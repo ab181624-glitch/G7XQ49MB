@@ -1,0 +1,28 @@
+# Example Package Whitelist
+# One package name per line
+# Comments starting with # are ignored
+
+# Core system packages
+bash
+coreutils
+systemd
+sudo
+wget
+curl
+git
+
+# Network utilities
+net-tools
+openssh-client
+openssh-server
+
+# Common utilities
+vim
+nano
+grep
+sed
+awk
+tar
+gzip
+
+# Add your approved packages below
