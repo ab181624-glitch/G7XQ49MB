@@ -972,6 +972,19 @@ configure_password_policy() {
     
     local changes_made=false
     
+    # Remove cracklib (conflicts with pwquality)
+    echo -e "\n${BOLD}Removing cracklib (conflicts with pwquality)...${NC}"
+    if dpkg -l | grep -q "libpam-cracklib"; then
+        if confirm_action "Remove libpam-cracklib package?"; then
+            apt remove -y libpam-cracklib 2>/dev/null
+            apt purge -y libpam-cracklib 2>/dev/null
+            print_success "Removed cracklib package"
+            changes_made=true
+        fi
+    else
+        print_success "cracklib not installed"
+    fi
+    
     # Get MAIN_USER if not set from user auditing
     if [[ -z "$MAIN_USER" ]]; then
         echo -e "${CYAN}Enter the main username to protect from lockout:${NC}"
@@ -1145,6 +1158,40 @@ configure_password_policy() {
         fi
     else
         print_warning "$pwquality_conf not found - password complexity not configured"
+    fi
+    
+    # 3. Remove nullok from PAM to prevent null password authentication
+    echo -e "\n${BOLD}Disabling null password authentication...${NC}"
+    print_info "Removing 'nullok' from PAM configuration"
+    
+    local common_auth="/etc/pam.d/common-auth"
+    local common_password="/etc/pam.d/common-password"
+    
+    if [[ -f "$common_auth" ]]; then
+        if grep -q "nullok" "$common_auth"; then
+            if confirm_action "Remove nullok from PAM common-auth (prevents empty passwords)?"; then
+                cp "$common_auth" "${common_auth}.bak.$(date +%Y%m%d_%H%M%S)"
+                sed -i 's/\s*nullok\s*/ /g' "$common_auth"
+                sed -i 's/nullok_secure/ /g' "$common_auth"
+                print_success "Removed nullok from common-auth"
+                changes_made=true
+            fi
+        else
+            print_success "nullok already removed from common-auth"
+        fi
+    fi
+    
+    if [[ -f "$common_password" ]]; then
+        if grep -q "nullok" "$common_password"; then
+            if confirm_action "Remove nullok from PAM common-password?"; then
+                cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
+                sed -i 's/\s*nullok\s*/ /g' "$common_password"
+                print_success "Removed nullok from common-password"
+                changes_made=true
+            fi
+        else
+            print_success "nullok already removed from common-password"
+        fi
     fi
     
     # 4. Configure account lockout policy (system-wide)
@@ -3951,6 +3998,18 @@ enforce_password_complexity() {
     echo ""
     
     local changes_made=false
+    
+    # Remove cracklib (conflicts with pwquality)
+    echo -e "\n${BOLD}Removing cracklib (conflicts with pwquality)...${NC}"
+    if dpkg -l | grep -q "libpam-cracklib"; then
+        print_info "Removing libpam-cracklib package..."
+        apt remove -y libpam-cracklib 2>/dev/null
+        apt purge -y libpam-cracklib 2>/dev/null
+        print_success "Removed cracklib package"
+        changes_made=true
+    else
+        print_success "cracklib not installed"
+    fi
     
     # Safety check
     echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
