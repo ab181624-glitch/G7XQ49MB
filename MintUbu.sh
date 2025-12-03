@@ -1160,39 +1160,10 @@ configure_password_policy() {
         print_warning "$pwquality_conf not found - password complexity not configured"
     fi
     
-    # 3. Remove nullok from PAM to prevent null password authentication
-    echo -e "\n${BOLD}Disabling null password authentication...${NC}"
-    print_info "Removing 'nullok' from PAM configuration"
-    
-    local common_auth="/etc/pam.d/common-auth"
-    local common_password="/etc/pam.d/common-password"
-    
-    if [[ -f "$common_auth" ]]; then
-        if grep -q "nullok" "$common_auth"; then
-            if confirm_action "Remove nullok from PAM common-auth (prevents empty passwords)?"; then
-                cp "$common_auth" "${common_auth}.bak.$(date +%Y%m%d_%H%M%S)"
-                sed -i 's/\s*nullok\s*/ /g' "$common_auth"
-                sed -i 's/nullok_secure/ /g' "$common_auth"
-                print_success "Removed nullok from common-auth"
-                changes_made=true
-            fi
-        else
-            print_success "nullok already removed from common-auth"
-        fi
-    fi
-    
-    if [[ -f "$common_password" ]]; then
-        if grep -q "nullok" "$common_password"; then
-            if confirm_action "Remove nullok from PAM common-password?"; then
-                cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
-                sed -i 's/\s*nullok\s*/ /g' "$common_password"
-                print_success "Removed nullok from common-password"
-                changes_made=true
-            fi
-        else
-            print_success "nullok already removed from common-password"
-        fi
-    fi
+    # 3. Manual PAM configuration notice
+    echo -e "\n${BOLD}PAM Configuration (Manual Steps Required)${NC}"
+    print_warning "PAM files must be edited manually to prevent sudo lockout"
+    print_info "Use option 13 'Manual PAM Configuration Guide' for instructions"
     
     # 4. Configure account lockout policy (system-wide)
     echo -e "\n${BOLD}Configuring system-wide account lockout...${NC}"
@@ -4083,88 +4054,36 @@ enforce_password_complexity() {
         fi
     fi
     
-    # Step 3: Enable PAM enforcement (DANGEROUS - This is the risky part)
-    echo -e "\n${BOLD}Step 3: Enable PAM Password Quality Enforcement${NC}"
+    # Step 3: Manual PAM Configuration Instructions
+    echo -e "\n${BOLD}Step 3: PAM Files - Manual Configuration Required${NC}"
     echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${RED}${BOLD}⚠️  DANGER ZONE - LOCKOUT RISK ⚠️${NC}"
+    echo -e "${RED}${BOLD}⚠️  MUST BE DONE MANUALLY TO AVOID LOCKOUT ⚠️${NC}"
     echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
     echo ""
-    print_warning "This step ENFORCES password complexity via PAM"
-    print_warning "Existing passwords that don't meet requirements may cause issues"
-    print_info "This is what gets you CyberPatriot points for password complexity"
+    print_warning "Automatic PAM editing disabled - too risky for sudo lockout"
+    print_info "Use option 13 'Manual PAM Configuration Guide' for detailed instructions"
     echo ""
     
     local common_password="/etc/pam.d/common-password"
     
+    # Just check current status, don't modify
     if [[ -f "$common_password" ]]; then
-        # Check if already configured
         if grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
-            print_info "PAM password quality already enabled"
+            print_success "PAM password quality is already enabled"
         else
-            echo -e "${YELLOW}Current PAM configuration:${NC}"
-            grep "^password" "$common_password" | head -5
-            echo ""
-            
-            if confirm_action "ENABLE PAM password quality enforcement? (RISKY)"; then
-                # Backup
-                cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
-                print_success "Created backup of common-password"
-                
-                # Add pam_pwquality BEFORE pam_unix.so
-                sed -i '/^password.*pam_unix.so/i password\trequisite\t\t\tpam_pwquality.so retry=3' "$common_password"
-                
-                print_success "PAM password quality enforcement ENABLED"
-                print_warning "New passwords MUST now meet complexity requirements"
-                changes_made=true
-                
-                echo ""
-                echo -e "${CYAN}${BOLD}IMMEDIATE ACTION REQUIRED:${NC}"
-                echo -e "${YELLOW}1. Test that you can still use sudo: ${NC}sudo whoami"
-                echo -e "${YELLOW}2. If locked out, reboot and restore from snapshot${NC}"
-                echo -e "${YELLOW}3. If successful, test changing a password${NC}"
-                echo ""
-            fi
-        fi
-    fi
-    
-    # Step 4: Enable Password History and Minimum Length (OPTIONAL - less risky)
-    echo -e "\n${BOLD}Step 4: Enable Password History and Minimum Length${NC}"
-    print_info "Prevents reusing last 5 passwords and enforces minimum length of 10"
-    print_warning "Moderate risk - existing users can still login with current password"
-    
-    if [[ -f "$common_password" ]]; then
-        # Check if minlen is already configured
-        local needs_update=false
-        if ! grep "pam_unix.so" "$common_password" | grep -q "minlen=" 2>/dev/null; then
-            needs_update=true
-        fi
-        if ! grep "pam_unix.so" "$common_password" | grep -q "remember=" 2>/dev/null; then
-            needs_update=true
+            print_warning "PAM password quality NOT enabled (use option 13 for instructions)"
         fi
         
-        if [[ "$needs_update" == true ]]; then
-            if confirm_action "Enable password history (remember last 5) and minimum length (10)?"; then
-                # Backup if not already done
-                if [[ ! -f "${common_password}.bak.$(date +%Y%m%d_%H%M%S)" ]]; then
-                    cp "$common_password" "${common_password}.bak.$(date +%Y%m%d_%H%M%S)"
-                fi
-                
-                # Add minlen=10 if not present
-                if ! grep "pam_unix.so" "$common_password" | grep -q "minlen=" 2>/dev/null; then
-                    sed -i '/^password.*pam_unix.so/ s/$/ minlen=10/' "$common_password"
-                    print_success "Minimum password length set to 10"
-                fi
-                
-                # Add remember=5 if not present
-                if ! grep "pam_unix.so" "$common_password" | grep -q "remember=" 2>/dev/null; then
-                    sed -i '/^password.*pam_unix.so/ s/$/ remember=5/' "$common_password"
-                    print_success "Password history enabled (last 5 passwords)"
-                fi
-                
-                changes_made=true
-            fi
+        if grep "pam_unix.so" "$common_password" | grep -q "minlen=" 2>/dev/null; then
+            print_success "Minimum password length is configured"
         else
-            print_info "Password history and minimum length already configured"
+            print_info "Minimum password length not configured in PAM"
+        fi
+        
+        if grep "pam_unix.so" "$common_password" | grep -q "remember=" 2>/dev/null; then
+            print_success "Password history is enabled"
+        else
+            print_info "Password history not configured"
         fi
     fi
     
@@ -4218,6 +4137,153 @@ enforce_password_complexity() {
 }
 
 #############################################
+# Task 13: Manual PAM Configuration Guide
+#############################################
+
+manual_pam_guide() {
+    print_header "MANUAL PAM CONFIGURATION GUIDE"
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}${BOLD}⚠️  TAKE VM SNAPSHOT BEFORE PROCEEDING ⚠️${NC}"
+    echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    print_warning "PAM file editing is MANUAL to prevent sudo lockout"
+    print_info "Follow these instructions carefully - test sudo after EACH step"
+    echo ""
+    
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}STEP 1: Remove 'nullok' from /etc/pam.d/common-auth${NC}"
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}What it does:${NC} Prevents users with empty passwords from logging in"
+    echo ""
+    echo -e "${YELLOW}Your /etc/pam.d/common-auth should look like this:${NC}"
+    echo ""
+    echo -e "${CYAN}#${NC}"
+    echo -e "${CYAN}# /etc/pam.d/common-auth - authentication settings common to all services${NC}"
+    echo -e "${CYAN}#${NC}"
+    echo -e "${WHITE}auth    [success=1 default=ignore]      pam_unix.so${NC}  ${YELLOW}# <-- Remove 'nullok' from here${NC}"
+    echo -e "${WHITE}auth    requisite                       pam_deny.so${NC}"
+    echo -e "${WHITE}auth    required                        pam_permit.so${NC}"
+    echo ""
+    echo -e "${YELLOW}Key changes:${NC}"
+    echo -e "  ${RED}✗${NC} Remove: ${WHITE}nullok${NC} or ${WHITE}nullok_secure${NC}"
+    echo -e "  ${GREEN}✓${NC} Just: ${GREEN}pam_unix.so${NC} with no nullok"
+    echo ""
+    echo -e "${YELLOW}Edit command:${NC}"
+    echo -e "  ${CYAN}sudo nano /etc/pam.d/common-auth${NC}"
+    echo ""
+    echo -e "${RED}TEST IMMEDIATELY:${NC} ${CYAN}sudo whoami${NC}"
+    echo ""
+    press_enter
+    
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}STEP 2: Add pam_pwquality to /etc/pam.d/common-password${NC}"
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}What it does:${NC} Enforces password complexity rules from /etc/security/pwquality.conf"
+    echo ""
+    echo -e "${GREEN}Commands:${NC}"
+    echo -e "  ${CYAN}sudo cp /etc/pam.d/common-password /etc/pam.d/common-password.bak${NC}"
+    echo -e "  ${CYAN}sudo nano /etc/pam.d/common-password${NC}"
+    echo ""
+    echo -e "${YELLOW}Find this line:${NC}"
+    echo -e "  ${WHITE}password [success=1 default=ignore] pam_unix.so obscure use_authtok${NC}"
+    echo ""
+    echo -e "${YELLOW}Add THIS line BEFORE it:${NC}"
+    echo -e "  ${GREEN}password required pam_pwquality.so retry=3${NC}"
+    echo ""
+    echo -e "${YELLOW}Result should look like:${NC}"
+    echo -e "  ${GREEN}password required pam_pwquality.so retry=3${NC}"
+    echo -e "  ${WHITE}password [success=1 default=ignore] pam_unix.so obscure use_authtok${NC}"
+    echo ""
+    echo -e "${YELLOW}Save: Ctrl+O, Enter, Ctrl+X${NC}"
+    echo ""
+    echo -e "${RED}TEST IMMEDIATELY:${NC} ${CYAN}sudo whoami${NC}"
+    echo ""
+    press_enter
+    
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}STEP 3: Add minlen and remember to pam_unix.so line${NC}"
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}What it does:${NC} Enforces minimum password length and prevents password reuse"
+    echo ""
+    echo -e "${GREEN}Commands:${NC}"
+    echo -e "  ${CYAN}sudo nano /etc/pam.d/common-password${NC}"
+    echo ""
+    echo -e "${YELLOW}Find this line:${NC}"
+    echo -e "  ${WHITE}password [success=1 default=ignore] pam_unix.so obscure use_authtok${NC}"
+    echo ""
+    echo -e "${YELLOW}Change it to:${NC}"
+    echo -e "  ${GREEN}password [success=1 default=ignore] pam_unix.so obscure use_authtok minlen=10 remember=5${NC}"
+    echo ""
+    echo -e "${YELLOW}Save: Ctrl+O, Enter, Ctrl+X${NC}"
+    echo ""
+    echo -e "${RED}TEST IMMEDIATELY:${NC} ${CYAN}sudo whoami${NC}"
+    echo ""
+    press_enter
+    
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}STEP 4: Remove 'nullok' from /etc/pam.d/common-password${NC}"
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}What it does:${NC} Prevents setting empty passwords"
+    echo ""
+    echo -e "${GREEN}Commands:${NC}"
+    echo -e "  ${CYAN}sudo nano /etc/pam.d/common-password${NC}"
+    echo ""
+    echo -e "${YELLOW}Find the pam_unix.so line and remove any 'nullok' if present${NC}"
+    echo ""
+    echo -e "${YELLOW}Save: Ctrl+O, Enter, Ctrl+X${NC}"
+    echo ""
+    echo -e "${RED}TEST IMMEDIATELY:${NC} ${CYAN}sudo whoami${NC}"
+    echo ""
+    press_enter
+    
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}VERIFICATION${NC}"
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}Check current configuration:${NC}"
+    echo -e "  ${CYAN}grep -E 'pam_pwquality|pam_unix' /etc/pam.d/common-password${NC}"
+    echo ""
+    echo -e "${YELLOW}Expected output should show:${NC}"
+    echo -e "  ${GREEN}password required pam_pwquality.so retry=3${NC}"
+    echo -e "  ${GREEN}password [success=1 default=ignore] pam_unix.so obscure use_authtok minlen=10 remember=5${NC}"
+    echo ""
+    echo -e "${YELLOW}Check pwquality.conf:${NC}"
+    echo -e "  ${CYAN}grep -E '^minlen|^dcredit|^ucredit|^lcredit|^ocredit' /etc/security/pwquality.conf${NC}"
+    echo ""
+    echo -e "${YELLOW}Test password change:${NC}"
+    echo -e "  ${CYAN}passwd${NC}  (try a weak password - it should be rejected)"
+    echo ""
+    
+    if confirm_action "Open /etc/pam.d/common-password in nano now?"; then
+        nano /etc/pam.d/common-password
+        print_info "File editing complete"
+    fi
+    
+    if confirm_action "Open /etc/pam.d/common-auth in nano now?"; then
+        nano /etc/pam.d/common-auth
+        print_info "File editing complete"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}IMPORTANT REMINDERS${NC}"
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}1. Test sudo after EVERY change${NC}"
+    echo -e "${YELLOW}2. If locked out, reboot and restore VM snapshot${NC}"
+    echo -e "${YELLOW}3. Keep your terminal open and test before closing${NC}"
+    echo -e "${YELLOW}4. Don't log out until you've verified sudo works${NC}"
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    print_header "MANUAL PAM CONFIGURATION GUIDE COMPLETE"
+    press_enter
+}
+
+#############################################
 # Main Menu
 #############################################
 
@@ -4235,6 +4301,7 @@ show_menu() {
     echo -e "${GREEN}10)${NC} Harden FTP Server (vsftpd)"
     echo -e "${GREEN}11)${NC} Enable Security Features"
     echo -e "${YELLOW}12)${NC} Enforce Password Complexity ${RED}(⚠️  SNAPSHOT FIRST!)${NC}"
+    echo -e "${CYAN}13)${NC} Manual PAM Configuration Guide ${YELLOW}(Safe - No Auto-Edit)${NC}"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -4266,6 +4333,7 @@ main() {
             10) harden_ftp ;;
             11) enable_security_features ;;
             12) enforce_password_complexity ;;
+            13) manual_pam_guide ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
