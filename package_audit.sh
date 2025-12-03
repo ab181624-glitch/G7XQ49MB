@@ -89,17 +89,27 @@ get_package_description() {
 
 # Download whitelist from GitHub
 download_whitelist() {
+    local temp_file="${WHITELIST_FILE}.tmp"
     echo -e "${YELLOW}Downloading whitelist from GitHub...${NC}"
-    if wget -q -O "$WHITELIST_FILE" "$GITHUB_RAW_URL" 2>/dev/null; then
+    
+    if wget -q -O "$temp_file" "$GITHUB_RAW_URL" 2>/dev/null; then
+        mv "$temp_file" "$WHITELIST_FILE"
         echo -e "${GREEN}✓ Whitelist downloaded successfully${NC}"
         log_message "Whitelist downloaded from $GITHUB_RAW_URL"
         return 0
     else
-        echo -e "${RED}✗ Failed to download whitelist${NC}"
-        echo -e "${YELLOW}Creating new whitelist file...${NC}"
-        touch "$WHITELIST_FILE"
-        log_message "Failed to download whitelist, created empty file"
-        return 1
+        rm -f "$temp_file"
+        if [ -f "$WHITELIST_FILE" ]; then
+            echo -e "${YELLOW}⚠ Download failed, using cached whitelist${NC}"
+            log_message "Failed to download whitelist, using cached version"
+            return 1
+        else
+            echo -e "${RED}✗ Failed to download whitelist and no cache available${NC}"
+            echo -e "${YELLOW}Creating new whitelist file...${NC}"
+            touch "$WHITELIST_FILE"
+            log_message "Failed to download whitelist, created empty file"
+            return 1
+        fi
     fi
 }
 
@@ -201,11 +211,11 @@ generate_sync_instructions() {
     echo ""
     echo -e "${BLUE}Option 2: Using GitHub API (requires token)${NC}"
     echo "  Run this command on a machine with GitHub access:"
-    echo "  ${YELLOW}cat $NEW_PACKAGES_FILE | while read pkg; do echo \"\$pkg\" >> package_whitelist.txt; done${NC}"
-    echo "  ${YELLOW}git add package_whitelist.txt && git commit -m 'Update whitelist' && git push${NC}"
+    echo -e "  ${YELLOW}cat $NEW_PACKAGES_FILE | while read pkg; do echo \"\$pkg\" >> package_whitelist.txt; done${NC}"
+    echo -e "  ${YELLOW}git add package_whitelist.txt && git commit -m 'Update whitelist' && git push${NC}"
     echo ""
     echo -e "${BLUE}Option 3: Email/Slack the additions${NC}"
-    echo "  Copy the file: ${YELLOW}$NEW_PACKAGES_FILE${NC}"
+    echo -e "  Copy the file: ${YELLOW}$NEW_PACKAGES_FILE${NC}"
     echo "  Send it to your admin to update the repository"
     echo ""
     

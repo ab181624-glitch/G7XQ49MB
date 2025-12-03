@@ -67,6 +67,7 @@ clangd
 clangd-18
 cmake
 cmake-data
+command-not-found
 console-setup
 console-setup-linux
 cpp
