@@ -172,7 +172,7 @@ user_auditing() {
     
     AUTHORIZED_USERS=()
     while true; do
-        echo -e -n "${CYAN}Username (or 'done'): ${NC}"
+        echo -e -n "${CYAN}Username (or 'done'): ${NC}"     
         read -r user
         [[ "$user" == "done" ]] && break
         [[ -z "$user" ]] && continue
@@ -469,6 +469,144 @@ EOF
             usermod -aG sudo "$MAIN_USER"
             print_success "Granted admin privileges to $MAIN_USER"
         fi
+    fi
+    
+    # Check for extra UID 0 accounts
+    echo -e "\n${BOLD}Checking for Extra UID 0 Accounts...${NC}"
+    print_info "Only 'root' should have UID 0"
+    
+    local uid0_accounts=()
+    while IFS=: read -r username _ uid _; do
+        if [[ "$uid" == "0" && "$username" != "root" ]]; then
+            uid0_accounts+=("$username")
+        fi
+    done < /etc/passwd
+    
+    if [[ ${#uid0_accounts[@]} -gt 0 ]]; then
+        print_warning "Found ${#uid0_accounts[@]} extra UID 0 account(s)!"
+        for account in "${uid0_accounts[@]}"; do
+            echo -e "  ${RED}!${NC} $account has UID 0 (root privileges)"
+        done
+        
+        if confirm_action "Remove these extra UID 0 accounts?"; then
+            for account in "${uid0_accounts[@]}"; do
+                if confirm_action "Delete account: $account?"; then
+                    userdel -r "$account" 2>/dev/null
+                    if [[ $? -eq 0 ]]; then
+                        print_success "Removed UID 0 account: $account"
+                        log_message "REMOVED EXTRA UID 0 ACCOUNT: $account"
+                    else
+                        print_error "Failed to remove: $account"
+                    fi
+                fi
+            done
+        fi
+    else
+        print_success "No extra UID 0 accounts found"
+    fi
+    
+    # Check for unlocked service accounts
+    echo -e "\n${BOLD}Checking for Unlocked Service Accounts...${NC}"
+    print_info "Service accounts (UID < 1000) should be locked"
+    
+    local unlocked_services=()
+    while IFS=: read -r username _ uid _ _ _ shell; do
+        if [[ $uid -lt 1000 && $uid -ne 0 ]]; then
+            local passwd_status=$(passwd -S "$username" 2>/dev/null | awk '{print $2}')
+            if [[ "$passwd_status" != "L" && "$passwd_status" != "LK" ]]; then
+                if [[ "$shell" != "/usr/sbin/nologin" && "$shell" != "/bin/false" && -n "$shell" ]]; then
+                    unlocked_services+=("$username:$uid:$shell")
+                fi
+            fi
+        fi
+    done < /etc/passwd
+    
+    if [[ ${#unlocked_services[@]} -gt 0 ]]; then
+        print_warning "Found ${#unlocked_services[@]} potentially unlocked service account(s)"
+        for entry in "${unlocked_services[@]}"; do
+            echo -e "  ${YELLOW}!${NC} $entry"
+        done
+        
+        if confirm_action "Lock these service accounts?"; then
+            for entry in "${unlocked_services[@]}"; do
+                local svc_user="${entry%%:*}"
+                if confirm_action "Lock account: $svc_user?"; then
+                    passwd -l "$svc_user" 2>/dev/null
+                    usermod -s /usr/sbin/nologin "$svc_user" 2>/dev/null
+                    if [[ $? -eq 0 ]]; then
+                        print_success "Locked service account: $svc_user"
+                        log_message "LOCKED SERVICE ACCOUNT: $svc_user"
+                    fi
+                fi
+            done
+        fi
+    else
+        print_success "No unlocked service accounts found"
+    fi
+    
+    # Check for unauthorized group members in critical groups
+    echo -e "\n${BOLD}Checking Critical Group Memberships...${NC}"
+    print_info "Reviewing sudo, admin, wheel groups"
+    
+    local critical_groups=("sudo" "admin" "wheel")
+    for group in "${critical_groups[@]}"; do
+        if getent group "$group" &>/dev/null; then
+            local members=$(getent group "$group" | cut -d: -f4)
+            if [[ -n "$members" ]]; then
+                echo -e "\n${CYAN}Group '$group' members:${NC} $members"
+                
+                if confirm_action "Review members of $group?"; then
+                    IFS=',' read -ra MEMBER_ARRAY <<< "$members"
+                    for member in "${MEMBER_ARRAY[@]}"; do
+                        echo -e "\n${YELLOW}User: $member${NC}"
+                        id "$member" 2>/dev/null || echo "User not found"
+                        
+                        if confirm_action "Remove $member from $group?"; then
+                            gpasswd -d "$member" "$group" 2>/dev/null
+                            if [[ $? -eq 0 ]]; then
+                                print_success "Removed $member from $group"
+                                log_message "REMOVED FROM GROUP $group: $member"
+                            fi
+                        fi
+                    done
+                fi
+            else
+                print_info "Group '$group' has no members"
+            fi
+        fi
+    done
+    
+    # Check for SSH authorized_keys
+    echo -e "\n${BOLD}Checking SSH Authorized Keys...${NC}"
+    print_info "Scanning for SSH keys in user home directories"
+    
+    local keys_found=0
+    while IFS=: read -r username _ uid _ _ homedir _; do
+        if [[ $uid -ge 1000 && $uid -lt 65534 ]]; then
+            if [[ -f "$homedir/.ssh/authorized_keys" ]]; then
+                local key_count=$(wc -l < "$homedir/.ssh/authorized_keys" 2>/dev/null || echo 0)
+                if [[ $key_count -gt 0 ]]; then
+                    echo -e "\n${YELLOW}User: $username${NC} has $key_count SSH key(s)"
+                    ((keys_found++))
+                    
+                    if confirm_action "Review SSH keys for $username?"; then
+                        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                        cat "$homedir/.ssh/authorized_keys"
+                        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                        
+                        if confirm_action "Remove ALL keys for $username?"; then
+                            rm -f "$homedir/.ssh/authorized_keys"
+                            print_success "Removed authorized_keys for $username"
+                            log_message "REMOVED SSH KEYS: $username"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    done < /etc/passwd
+    
+    if [[ $keys_found -eq 0 ]]; then
+        print_success "No SSH authorized_keys files found"
     fi
     
     print_header "USER AUDIT COMPLETE"
@@ -1626,7 +1764,101 @@ audit_services() {
         print_success "rsyslog already running"
     fi
     
-    # Part 6: Check for Unauthorized Repositories
+    # Part 6: Network Connections Audit
+    echo -e "\n${BOLD}Step 5: Network Connections Audit${NC}"
+    print_info "Checking active network connections and listening ports"
+    
+    if confirm_action "Display active network connections (netstat -tupan)?"; then
+        echo -e "\n${CYAN}Active Network Connections:${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        
+        if command -v netstat &>/dev/null; then
+            netstat -tupan 2>/dev/null | head -30
+        elif command -v ss &>/dev/null; then
+            print_info "Using 'ss' (modern replacement for netstat)"
+            ss -tupan | head -30
+        else
+            print_warning "Neither netstat nor ss found - install net-tools"
+            print_info "Run: sudo apt install net-tools"
+        fi
+        
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        
+        echo -e "\n${YELLOW}Review the connections above:${NC}"
+        echo -e "  - Look for unusual ports or connections"
+        echo -e "  - Check PIDs with: ${CYAN}sudo ps aux | grep <PID>${NC}"
+        echo -e "  - Kill suspicious processes: ${CYAN}sudo kill -9 <PID>${NC}"
+        
+        press_enter
+    fi
+    
+    # Part 7: Snap Package Audit
+    echo -e "\n${BOLD}Step 6: Snap Package Audit${NC}"
+    print_info "Checking installed snap packages"
+    
+    if command -v snap &>/dev/null; then
+        if confirm_action "Display installed snap packages?"; then
+            echo -e "\n${CYAN}Installed Snap Packages:${NC}"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            snap list
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            
+            echo -e "\n${YELLOW}Review installed snaps:${NC}"
+            echo -e "  - Remove unauthorized games: ${CYAN}sudo snap remove <package>${NC}"
+            echo -e "  - Common unauthorized snaps: goldeneye, pixeldungeon, themole"
+            echo -e "  - Google any unknown packages for security concerns"
+            
+            if confirm_action "Remove a snap package now?"; then
+                echo -e -n "${CYAN}Enter snap package name to remove: ${NC}"
+                read -r snap_name
+                if [[ -n "$snap_name" ]]; then
+                    snap remove "$snap_name"
+                    if [[ $? -eq 0 ]]; then
+                        print_success "Removed snap: $snap_name"
+                        log_message "REMOVED SNAP PACKAGE: $snap_name"
+                        changes_made=true
+                    else
+                        print_error "Failed to remove snap: $snap_name"
+                    fi
+                fi
+            fi
+        fi
+    else
+        print_info "Snap not installed on this system"
+    fi
+    
+    # Part 8: Package Installation History
+    echo -e "\n${BOLD}Step 7: Package Installation History${NC}"
+    print_info "Reviewing recently installed packages"
+    
+    if confirm_action "Review /var/log/apt history?"; then
+        if [[ -f "/var/log/apt/history.log" ]]; then
+            echo -e "\n${CYAN}Recent Package Changes (last 50 lines):${NC}"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            tail -50 /var/log/apt/history.log
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            
+            echo -e "\n${YELLOW}Look for:${NC}"
+            echo -e "  - Unauthorized game installs (goldeneye, pixeldungeon, themole)"
+            echo -e "  - Hacking tools (wireshark, nmap, john, hydra)"
+            echo -e "  - Suspicious packages installed recently"
+            
+            press_enter
+        else
+            print_warning "/var/log/apt/history.log not found"
+        fi
+        
+        if [[ -d "/var/log/apt" ]]; then
+            echo -e "\n${CYAN}All APT log files:${NC}"
+            ls -lh /var/log/apt/
+            
+            if confirm_action "View full history.log file?"; then
+                less /var/log/apt/history.log
+            fi
+        fi
+    fi
+    
+    # Part 9: Check for unauthorized repositories
     echo -e "\n${BOLD}Step 5: Unauthorized Repository Check${NC}"
     print_info "Checking package sources for unauthorized repositories"
     
@@ -1756,28 +1988,136 @@ audit_file_permissions() {
     
     local changes_made=false
     
-    # 1. Secure /etc/shadow permissions
-    echo -e "\n${BOLD}Checking /etc/shadow permissions...${NC}"
+    # 1. Secure critical system file permissions
+    echo -e "\n${BOLD}Checking critical system file permissions...${NC}"
+    print_info "Verifying permissions on /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow, /etc/sudoers"
     
-    if [[ -f "/etc/shadow" ]]; then
-        local current_perms=$(stat -c "%a" /etc/shadow 2>/dev/null)
-        print_info "Current /etc/shadow permissions: $current_perms"
+    local files_fixed=0
+    
+    # /etc/passwd - should be 644 root:root
+    if [[ -f "/etc/passwd" ]]; then
+        local current_perms=$(stat -c "%a" /etc/passwd 2>/dev/null)
+        local current_owner=$(stat -c "%U:%G" /etc/passwd 2>/dev/null)
+        print_info "/etc/passwd - Current: $current_perms $current_owner (Required: 644 root:root)"
         
-        if [[ "$current_perms" != "640" ]]; then
-            if confirm_action "Set /etc/shadow permissions to 640 (root:shadow rw-r-----)?"; then
-                chmod 640 /etc/shadow
+        if [[ "$current_perms" != "644" ]] || [[ "$current_owner" != "root:root" ]]; then
+            if confirm_action "Fix /etc/passwd permissions to 644 root:root?"; then
+                chown root:root /etc/passwd && chmod 644 /etc/passwd
                 if [[ $? -eq 0 ]]; then
-                    print_success "Set /etc/shadow permissions to 640"
+                    print_success "Fixed /etc/passwd permissions"
+                    ((files_fixed++))
                     changes_made=true
                 else
-                    print_error "Failed to change /etc/shadow permissions"
+                    print_error "Failed to fix /etc/passwd permissions"
                 fi
             fi
         else
-            print_success "/etc/shadow already has secure permissions (640)"
+            print_success "/etc/passwd has correct permissions"
         fi
     else
-        print_error "/etc/shadow not found"
+        print_error "/etc/passwd not found!"
+    fi
+    
+    # /etc/shadow - should be 640 root:shadow
+    if [[ -f "/etc/shadow" ]]; then
+        local current_perms=$(stat -c "%a" /etc/shadow 2>/dev/null)
+        local current_owner=$(stat -c "%U:%G" /etc/shadow 2>/dev/null)
+        print_info "/etc/shadow - Current: $current_perms $current_owner (Required: 640 root:shadow)"
+        
+        if [[ "$current_perms" != "640" ]] || [[ "$current_owner" != "root:shadow" ]]; then
+            if confirm_action "Fix /etc/shadow permissions to 640 root:shadow?"; then
+                chown root:shadow /etc/shadow && chmod 640 /etc/shadow
+                if [[ $? -eq 0 ]]; then
+                    print_success "Fixed /etc/shadow permissions"
+                    ((files_fixed++))
+                    changes_made=true
+                else
+                    print_error "Failed to fix /etc/shadow permissions"
+                fi
+            fi
+        else
+            print_success "/etc/shadow has correct permissions"
+        fi
+    else
+        print_error "/etc/shadow not found!"
+    fi
+    
+    # /etc/group - should be 644 root:root
+    if [[ -f "/etc/group" ]]; then
+        local current_perms=$(stat -c "%a" /etc/group 2>/dev/null)
+        local current_owner=$(stat -c "%U:%G" /etc/group 2>/dev/null)
+        print_info "/etc/group - Current: $current_perms $current_owner (Required: 644 root:root)"
+        
+        if [[ "$current_perms" != "644" ]] || [[ "$current_owner" != "root:root" ]]; then
+            if confirm_action "Fix /etc/group permissions to 644 root:root?"; then
+                chown root:root /etc/group && chmod 644 /etc/group
+                if [[ $? -eq 0 ]]; then
+                    print_success "Fixed /etc/group permissions"
+                    ((files_fixed++))
+                    changes_made=true
+                else
+                    print_error "Failed to fix /etc/group permissions"
+                fi
+            fi
+        else
+            print_success "/etc/group has correct permissions"
+        fi
+    else
+        print_error "/etc/group not found!"
+    fi
+    
+    # /etc/gshadow - should be 640 root:shadow
+    if [[ -f "/etc/gshadow" ]]; then
+        local current_perms=$(stat -c "%a" /etc/gshadow 2>/dev/null)
+        local current_owner=$(stat -c "%U:%G" /etc/gshadow 2>/dev/null)
+        print_info "/etc/gshadow - Current: $current_perms $current_owner (Required: 640 root:shadow)"
+        
+        if [[ "$current_perms" != "640" ]] || [[ "$current_owner" != "root:shadow" ]]; then
+            if confirm_action "Fix /etc/gshadow permissions to 640 root:shadow?"; then
+                chown root:shadow /etc/gshadow && chmod 640 /etc/gshadow
+                if [[ $? -eq 0 ]]; then
+                    print_success "Fixed /etc/gshadow permissions"
+                    ((files_fixed++))
+                    changes_made=true
+                else
+                    print_error "Failed to fix /etc/gshadow permissions"
+                fi
+            fi
+        else
+            print_success "/etc/gshadow has correct permissions"
+        fi
+    else
+        print_error "/etc/gshadow not found!"
+    fi
+    
+    # /etc/sudoers - should be 440 root:root
+    if [[ -f "/etc/sudoers" ]]; then
+        local current_perms=$(stat -c "%a" /etc/sudoers 2>/dev/null)
+        local current_owner=$(stat -c "%U:%G" /etc/sudoers 2>/dev/null)
+        print_info "/etc/sudoers - Current: $current_perms $current_owner (Required: 440 root:root)"
+        
+        if [[ "$current_perms" != "440" ]] || [[ "$current_owner" != "root:root" ]]; then
+            if confirm_action "Fix /etc/sudoers permissions to 440 root:root?"; then
+                chown root:root /etc/sudoers && chmod 440 /etc/sudoers
+                if [[ $? -eq 0 ]]; then
+                    print_success "Fixed /etc/sudoers permissions"
+                    ((files_fixed++))
+                    changes_made=true
+                else
+                    print_error "Failed to fix /etc/sudoers permissions"
+                fi
+            fi
+        else
+            print_success "/etc/sudoers has correct permissions"
+        fi
+    else
+        print_error "/etc/sudoers not found!"
+    fi
+    
+    if [[ $files_fixed -gt 0 ]]; then
+        print_success "Fixed permissions on $files_fixed critical system file(s)"
+    else
+        print_success "All critical system files have correct permissions"
     fi
     
     # 2. Configure sudoers file
@@ -1794,6 +2134,92 @@ audit_file_permissions() {
         visudo
         print_success "Finished editing sudoers"
         changes_made=true
+    fi
+    
+    # Check for direct user entries in sudoers
+    echo -e "\n${BOLD}Checking for Direct /etc/sudoers Entries...${NC}"
+    print_info "Users should be in sudo group, not directly in sudoers file"
+    
+    if [[ -f "/etc/sudoers" ]]; then
+        local direct_entries=$(grep -E "^[a-zA-Z].*ALL.*ALL" /etc/sudoers 2>/dev/null | grep -v "^root" | grep -v "^%")
+        
+        if [[ -n "$direct_entries" ]]; then
+            print_warning "Found direct user entries in /etc/sudoers:"
+            echo -e "${YELLOW}$direct_entries${NC}"
+            print_info "These should be removed - users should be in sudo group instead"
+            
+            if confirm_action "Open sudoers to remove direct user entries?"; then
+                visudo
+                changes_made=true
+            fi
+        else
+            print_success "No direct user entries in /etc/sudoers"
+        fi
+    fi
+    
+    # Scan for unauthorized SETUID/SETGID binaries
+    echo -e "\n${BOLD}Scanning for SETUID/SETGID Binaries...${NC}"
+    print_info "This scans for binaries with elevated privileges"
+    
+    if confirm_action "Scan for SETUID/SETGID files?"; then
+        local suid_files="/tmp/suid_scan_$(date +%s).txt"
+        
+        print_info "Scanning filesystem (this may take a minute)..."
+        find / -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null > "$suid_files"
+        
+        local suid_count=$(wc -l < "$suid_files")
+        print_info "Found $suid_count SETUID/SETGID files"
+        
+        # Known legitimate setuid binaries
+        local legitimate_suid=(
+            "/usr/bin/sudo"
+            "/usr/bin/su"
+            "/usr/bin/passwd"
+            "/usr/bin/chfn"
+            "/usr/bin/chsh"
+            "/usr/bin/newgrp"
+            "/usr/bin/gpasswd"
+            "/usr/bin/mount"
+            "/usr/bin/umount"
+            "/usr/bin/pkexec"
+            "/usr/lib/openssh/ssh-keysign"
+            "/usr/lib/dbus-1.0/dbus-daemon-launch-helper"
+            "/usr/lib/policykit-1/polkit-agent-helper-1"
+        )
+        
+        echo -e "\n${CYAN}Checking for suspicious SETUID/SETGID files:${NC}"
+        local suspicious_found=false
+        
+        while IFS= read -r line; do
+            local filepath=$(echo "$line" | awk '{print $NF}')
+            local is_legit=false
+            
+            for legit in "${legitimate_suid[@]}"; do
+                if [[ "$filepath" == "$legit" ]]; then
+                    is_legit=true
+                    break
+                fi
+            done
+            
+            if [[ "$is_legit" == false ]]; then
+                echo -e "  ${YELLOW}⚠${NC}  $filepath"
+                suspicious_found=true
+            fi
+        done < "$suid_files"
+        
+        if [[ "$suspicious_found" == false ]]; then
+            print_success "All SETUID/SETGID files appear legitimate"
+        else
+            echo -e "\n${YELLOW}Review suspicious files above${NC}"
+            echo -e "To remove SETUID bit: ${CYAN}sudo chmod u-s <file>${NC}"
+            echo -e "To remove SETGID bit: ${CYAN}sudo chmod g-s <file>${NC}"
+            
+            if confirm_action "View full SETUID/SETGID file list?"; then
+                less "$suid_files"
+            fi
+        fi
+        
+        rm -f "$suid_files"
     fi
     
     # 3. Secure /proc with hidepid
@@ -1903,12 +2329,54 @@ EOF
     echo -e "\n${BOLD}File Permissions Audit Summary:${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
+    # Check all critical system files
+    if [[ -f "/etc/passwd" ]]; then
+        local passwd_perms=$(stat -c "%a" /etc/passwd 2>/dev/null)
+        local passwd_owner=$(stat -c "%U:%G" /etc/passwd 2>/dev/null)
+        if [[ "$passwd_perms" == "644" && "$passwd_owner" == "root:root" ]]; then
+            echo -e "${GREEN}✓${NC} /etc/passwd: 644 root:root (secure)"
+        else
+            echo -e "${YELLOW}!${NC} /etc/passwd: $passwd_perms $passwd_owner"
+        fi
+    fi
+    
     if [[ -f "/etc/shadow" ]]; then
         local shadow_perms=$(stat -c "%a" /etc/shadow 2>/dev/null)
-        if [[ "$shadow_perms" == "640" ]]; then
-            echo -e "${GREEN}✓${NC} /etc/shadow permissions: 640 (secure)"
+        local shadow_owner=$(stat -c "%U:%G" /etc/shadow 2>/dev/null)
+        if [[ "$shadow_perms" == "640" && "$shadow_owner" == "root:shadow" ]]; then
+            echo -e "${GREEN}✓${NC} /etc/shadow: 640 root:shadow (secure)"
         else
-            echo -e "${YELLOW}!${NC} /etc/shadow permissions: $shadow_perms"
+            echo -e "${YELLOW}!${NC} /etc/shadow: $shadow_perms $shadow_owner"
+        fi
+    fi
+    
+    if [[ -f "/etc/group" ]]; then
+        local group_perms=$(stat -c "%a" /etc/group 2>/dev/null)
+        local group_owner=$(stat -c "%U:%G" /etc/group 2>/dev/null)
+        if [[ "$group_perms" == "644" && "$group_owner" == "root:root" ]]; then
+            echo -e "${GREEN}✓${NC} /etc/group: 644 root:root (secure)"
+        else
+            echo -e "${YELLOW}!${NC} /etc/group: $group_perms $group_owner"
+        fi
+    fi
+    
+    if [[ -f "/etc/gshadow" ]]; then
+        local gshadow_perms=$(stat -c "%a" /etc/gshadow 2>/dev/null)
+        local gshadow_owner=$(stat -c "%U:%G" /etc/gshadow 2>/dev/null)
+        if [[ "$gshadow_perms" == "640" && "$gshadow_owner" == "root:shadow" ]]; then
+            echo -e "${GREEN}✓${NC} /etc/gshadow: 640 root:shadow (secure)"
+        else
+            echo -e "${YELLOW}!${NC} /etc/gshadow: $gshadow_perms $gshadow_owner"
+        fi
+    fi
+    
+    if [[ -f "/etc/sudoers" ]]; then
+        local sudoers_perms=$(stat -c "%a" /etc/sudoers 2>/dev/null)
+        local sudoers_owner=$(stat -c "%U:%G" /etc/sudoers 2>/dev/null)
+        if [[ "$sudoers_perms" == "440" && "$sudoers_owner" == "root:root" ]]; then
+            echo -e "${GREEN}✓${NC} /etc/sudoers: 440 root:root (secure)"
+        else
+            echo -e "${YELLOW}!${NC} /etc/sudoers: $sudoers_perms $sudoers_owner"
         fi
     fi
     
@@ -2652,6 +3120,254 @@ harden_ssh() {
 }
 
 #############################################
+# Task 9b: FTP Server Hardening
+#############################################
+
+harden_ftp() {
+    print_header "FTP SERVER HARDENING (VSFTPD)"
+    print_info "This module will harden FTP server configuration"
+    print_warning "FTP is inherently insecure - consider using SFTP instead"
+    
+    local changes_made=false
+    local vsftpd_config="/etc/vsftpd.conf"
+    
+    # Check if vsftpd is installed
+    if [[ ! -f "$vsftpd_config" ]]; then
+        print_warning "vsftpd is not installed or config file not found"
+        
+        if confirm_action "Install vsftpd FTP server?"; then
+            apt update && apt install -y vsftpd
+            if [[ $? -eq 0 ]]; then
+                print_success "vsftpd installed"
+            else
+                print_error "Failed to install vsftpd"
+                press_enter
+                return 1
+            fi
+        else
+            press_enter
+            return 1
+        fi
+    fi
+    
+    # Backup config
+    cp "$vsftpd_config" "${vsftpd_config}.bak.$(date +%Y%m%d_%H%M%S)"
+    print_success "Created backup of vsftpd.conf"
+    
+    # Helper function to set vsftpd config parameter
+    set_ftp_param() {
+        local param=$1
+        local value=$2
+        
+        if grep -q "^${param}=" "$vsftpd_config"; then
+            sed -i "s/^${param}=.*/${param}=${value}/" "$vsftpd_config"
+        elif grep -q "^#${param}=" "$vsftpd_config"; then
+            sed -i "s/^#${param}=.*/${param}=${value}/" "$vsftpd_config"
+        else
+            echo "${param}=${value}" >> "$vsftpd_config"
+        fi
+    }
+    
+    echo -e "\n${BOLD}Configuring FTP security settings...${NC}"
+    
+    if confirm_action "Apply comprehensive FTP hardening?"; then
+        # Anonymous login
+        echo -e "\n${BOLD}1. Anonymous Access${NC}"
+        set_ftp_param "anonymous_enable" "NO"
+        print_success "Disabled anonymous FTP access"
+        
+        # Local users
+        echo -e "\n${BOLD}2. Local User Access${NC}"
+        set_ftp_param "local_enable" "YES"
+        set_ftp_param "write_enable" "YES"
+        print_success "Enabled local user access with write permissions"
+        
+        # Chroot jail for security
+        echo -e "\n${BOLD}3. Chroot Jail (Restrict users to home directory)${NC}"
+        set_ftp_param "chroot_local_user" "YES"
+        set_ftp_param "allow_writeable_chroot" "YES"
+        print_success "Enabled chroot jail for local users"
+        
+        # SSL/TLS encryption
+        echo -e "\n${BOLD}4. SSL/TLS Encryption${NC}"
+        if confirm_action "Enable SSL/TLS for FTP (FTPS)?"; then
+            set_ftp_param "ssl_enable" "YES"
+            set_ftp_param "allow_anon_ssl" "NO"
+            set_ftp_param "force_local_data_ssl" "YES"
+            set_ftp_param "force_local_logins_ssl" "YES"
+            set_ftp_param "ssl_tlsv1" "YES"
+            set_ftp_param "ssl_sslv2" "NO"
+            set_ftp_param "ssl_sslv3" "NO"
+            set_ftp_param "require_ssl_reuse" "NO"
+            set_ftp_param "ssl_ciphers" "HIGH"
+            
+            # Generate self-signed certificate if doesn't exist
+            if [[ ! -f "/etc/ssl/private/vsftpd.pem" ]]; then
+                print_info "Generating self-signed SSL certificate..."
+                openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+                    -keyout /etc/ssl/private/vsftpd.pem \
+                    -out /etc/ssl/private/vsftpd.pem \
+                    -subj "/C=US/ST=State/L=City/O=Organization/CN=ftp.local" 2>/dev/null
+                
+                if [[ $? -eq 0 ]]; then
+                    chmod 600 /etc/ssl/private/vsftpd.pem
+                    print_success "Generated SSL certificate"
+                fi
+            fi
+            
+            set_ftp_param "rsa_cert_file" "/etc/ssl/private/vsftpd.pem"
+            set_ftp_param "rsa_private_key_file" "/etc/ssl/private/vsftpd.pem"
+            print_success "Enabled SSL/TLS encryption (FTPS)"
+        fi
+        
+        # Passive mode configuration
+        echo -e "\n${BOLD}5. Passive Mode (for NAT/Firewall)${NC}"
+        if confirm_action "Configure passive mode?"; then
+            set_ftp_param "pasv_enable" "YES"
+            set_ftp_param "pasv_min_port" "40000"
+            set_ftp_param "pasv_max_port" "50000"
+            print_success "Configured passive mode (ports 40000-50000)"
+            print_warning "Remember to allow ports 40000-50000 in firewall!"
+        fi
+        
+        # User restrictions
+        echo -e "\n${BOLD}6. User Access Control${NC}"
+        
+        # Create userlist file if doesn't exist
+        touch /etc/vsftpd.userlist
+        touch /etc/vsftpd.deny_users
+        
+        set_ftp_param "userlist_enable" "YES"
+        set_ftp_param "userlist_deny" "NO"
+        set_ftp_param "userlist_file" "/etc/vsftpd.userlist"
+        print_success "Enabled user access control (whitelist mode)"
+        print_info "Add allowed users to: /etc/vsftpd.userlist"
+        
+        # Deny specific users from FTP
+        if confirm_action "Configure deny list for specific users?"; then
+            echo -e "\n${CYAN}Enter username to deny FTP access (or 'done'):${NC}"
+            while true; do
+                echo -e -n "${CYAN}Username to deny (or 'done'): ${NC}"
+                read -r deny_user
+                [[ "$deny_user" == "done" || -z "$deny_user" ]] && break
+                
+                if ! grep -q "^${deny_user}$" /etc/vsftpd.deny_users 2>/dev/null; then
+                    echo "$deny_user" >> /etc/vsftpd.deny_users
+                    print_success "Added $deny_user to deny list"
+                else
+                    print_info "$deny_user already in deny list"
+                fi
+            done
+        fi
+        
+        # Logging
+        echo -e "\n${BOLD}7. Logging${NC}"
+        set_ftp_param "xferlog_enable" "YES"
+        set_ftp_param "xferlog_std_format" "YES"
+        set_ftp_param "xferlog_file" "/var/log/vsftpd.log"
+        set_ftp_param "log_ftp_protocol" "YES"
+        print_success "Enabled comprehensive FTP logging"
+        
+        # Connection limits
+        echo -e "\n${BOLD}8. Connection Limits${NC}"
+        set_ftp_param "max_clients" "50"
+        set_ftp_param "max_per_ip" "5"
+        print_success "Set connection limits (50 total, 5 per IP)"
+        
+        # Timeouts
+        echo -e "\n${BOLD}9. Timeouts${NC}"
+        set_ftp_param "idle_session_timeout" "600"
+        set_ftp_param "data_connection_timeout" "120"
+        print_success "Set session timeout (600s) and data timeout (120s)"
+        
+        # Banner
+        echo -e "\n${BOLD}10. Login Banner${NC}"
+        set_ftp_param "ftpd_banner" "Authorized access only. All activity is monitored."
+        print_success "Set security banner"
+        
+        # Disable write commands for specific users
+        echo -e "\n${BOLD}11. Write Command Restrictions${NC}"
+        if confirm_action "Create write-denied user list?"; then
+            touch /etc/vsftpd.readonly_users
+            echo -e "\n${CYAN}Enter username to deny write access (or 'done'):${NC}"
+            
+            while true; do
+                echo -e -n "${CYAN}Username for read-only (or 'done'): ${NC}"
+                read -r ro_user
+                [[ "$ro_user" == "done" || -z "$ro_user" ]] && break
+                
+                if ! grep -q "^${ro_user}$" /etc/vsftpd.readonly_users 2>/dev/null; then
+                    echo "$ro_user" >> /etc/vsftpd.readonly_users
+                    print_success "Added $ro_user to read-only list"
+                else
+                    print_info "$ro_user already in read-only list"
+                fi
+            done
+            
+            # Add per-user config directory
+            mkdir -p /etc/vsftpd/user_conf
+            set_ftp_param "user_config_dir" "/etc/vsftpd/user_conf"
+            
+            # Create config files for read-only users
+            while IFS= read -r ro_user; do
+                if [[ -n "$ro_user" ]]; then
+                    echo "write_enable=NO" > "/etc/vsftpd/user_conf/${ro_user}"
+                    echo "cmds_allowed=FEAT,REST,CWD,LIST,MDTM,MKD,NLST,PASS,PASV,PORT,PWD,QUIT,RETR,SIZE,STOR,TYPE,USER,ACCT,APPE,CDUP,HELP,MODE,NOOP,REIN,STAT,STOU,STRU,SYST" > "/etc/vsftpd/user_conf/${ro_user}"
+                    # Remove write commands
+                    sed -i 's/,STOR,/,/' "/etc/vsftpd/user_conf/${ro_user}"
+                    sed -i 's/,DELE,/,/' "/etc/vsftpd/user_conf/${ro_user}"
+                    sed -i 's/,RMD,/,/' "/etc/vsftpd/user_conf/${ro_user}"
+                    sed -i 's/,RNFR,/,/' "/etc/vsftpd/user_conf/${ro_user}"
+                    sed -i 's/,RNTO,/,/' "/etc/vsftpd/user_conf/${ro_user}"
+                    sed -i 's/,APPE,/,/' "/etc/vsftpd/user_conf/${ro_user}"
+                fi
+            done < /etc/vsftpd.readonly_users
+            
+            print_success "Configured per-user write restrictions"
+        fi
+        
+        # Additional security settings
+        echo -e "\n${BOLD}12. Additional Security${NC}"
+        set_ftp_param "hide_ids" "YES"
+        set_ftp_param "use_localtime" "YES"
+        set_ftp_param "secure_chroot_dir" "/var/run/vsftpd/empty"
+        print_success "Applied additional security settings"
+        
+        changes_made=true
+    fi
+    
+    # Display current configuration
+    echo -e "\n${BOLD}Current FTP Configuration Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    grep "^anonymous_enable\|^local_enable\|^write_enable\|^chroot_local_user\|^ssl_enable\|^pasv_enable\|^userlist_enable\|^max_clients\|^max_per_ip" "$vsftpd_config" 2>/dev/null || echo "Config file may be empty"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Restart FTP service
+    if [[ "$changes_made" == true ]]; then
+        echo -e "\n${BOLD}Restarting FTP service...${NC}"
+        if confirm_action "Restart vsftpd service to apply changes?"; then
+            systemctl enable vsftpd 2>/dev/null
+            systemctl restart vsftpd 2>/dev/null
+            if [[ $? -eq 0 ]]; then
+                print_success "vsftpd service restarted and enabled"
+                
+                echo -e "\n${YELLOW}Post-Configuration Steps:${NC}"
+                echo -e "  1. Add allowed users to ${CYAN}/etc/vsftpd.userlist${NC}"
+                echo -e "  2. If using SSL, clients must connect with FTPS (not plain FTP)"
+                echo -e "  3. Open firewall ports: ${CYAN}sudo ufw allow 20,21,40000:50000/tcp${NC}"
+                echo -e "  4. Test FTP connection: ${CYAN}ftp localhost${NC}"
+                echo -e "  5. Monitor logs: ${CYAN}tail -f /var/log/vsftpd.log${NC}"
+            else
+                print_error "Failed to restart vsftpd service"
+            fi
+        fi
+    fi
+    
+    print_header "FTP HARDENING COMPLETE"
+    press_enter
+}
+
+#############################################
 # Task 10: Enable Security Features
 #############################################
 
@@ -3223,7 +3939,7 @@ EOF
 }
 
 #############################################
-# Task 11: Safe Password Complexity (No Lockout Risk)
+# Task 12: Safe Password Complexity (No Lockout Risk)
 #############################################
 
 enforce_password_complexity() {
@@ -3457,8 +4173,9 @@ show_menu() {
     echo -e "${GREEN} 7)${NC} Update System"
     echo -e "${GREEN} 8)${NC} Remove Prohibited Software"
     echo -e "${GREEN} 9)${NC} Harden SSH Configuration"
-    echo -e "${GREEN}10)${NC} Enable Security Features"
-    echo -e "${YELLOW}11)${NC} Enforce Password Complexity ${RED}(⚠️  SNAPSHOT FIRST!)${NC}"
+    echo -e "${GREEN}10)${NC} Harden FTP Server (vsftpd)"
+    echo -e "${GREEN}11)${NC} Enable Security Features"
+    echo -e "${YELLOW}12)${NC} Enforce Password Complexity ${RED}(⚠️  SNAPSHOT FIRST!)${NC}"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -3487,8 +4204,9 @@ main() {
             7) update_system ;;
             8) remove_prohibited_software ;;
             9) harden_ssh ;;
-            10) enable_security_features ;;
-            11) enforce_password_complexity ;;
+            10) harden_ftp ;;
+            11) enable_security_features ;;
+            12) enforce_password_complexity ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
