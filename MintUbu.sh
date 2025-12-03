@@ -1167,21 +1167,20 @@ configure_password_policy() {
     
     # 4. Configure account lockout policy (system-wide)
     echo -e "\n${BOLD}Configuring system-wide account lockout...${NC}"
-    print_info "Locks accounts after repeated failed login attempts"
-    print_warning "NOTE: Faillock affects all users - MAIN_USER cannot be exempted from PAM"
-    print_info "Make sure you know the password for: $MAIN_USER"
+    print_info "Account lockout via faillock requires manual PAM configuration"
+    print_warning "IMPORTANT: common-auth modification disabled to prevent lockouts"
+    print_info "See option 13 for manual PAM common-auth configuration"
     
-    # Check which lockout mechanism is available
+    # Only configure faillock.conf, DO NOT modify PAM files
     if command -v faillock &>/dev/null || [[ -f "/usr/sbin/faillock" ]]; then
-        print_info "System uses 'faillock' for account lockout"
+        print_info "System has 'faillock' available for account lockout"
         
-        if confirm_action "Configure comprehensive account lockout with PAM?"; then
+        if confirm_action "Configure account lockout (faillock.conf, GDM, SSH)?"; then
             local faillock_conf="/etc/security/faillock.conf"
-            local common_auth="/etc/pam.d/common-auth"
             local gdm_password="/etc/pam.d/gdm-password"
             local sshd_pam="/etc/pam.d/sshd"
             
-            # Step 1: Configure /etc/security/faillock.conf
+            # Step 1: Configure faillock.conf
             echo -e "${BOLD}Step 1: Configuring faillock.conf...${NC}"
             if [[ ! -f "$faillock_conf" ]]; then
                 # Create new faillock.conf
@@ -1227,43 +1226,8 @@ EOF
                 changes_made=true
             fi
             
-            # Step 2: Configure PAM common-auth (CAREFUL - this is critical)
-            echo -e "\n${BOLD}Step 2: Configuring PAM common-auth...${NC}"
-            print_warning "CRITICAL: Modifying PAM auth can lock you out if done incorrectly!"
-            print_info "A backup will be created before any changes"
-            
-            if [[ -f "$common_auth" ]]; then
-                if confirm_action "Add faillock to PAM common-auth (SAFE method)?"; then
-                    cp "$common_auth" "${common_auth}.bak.$(date +%Y%m%d_%H%M%S)"
-                    print_success "Created backup of common-auth"
-                    
-                    # Check if faillock is already configured
-                    if ! grep -q "pam_faillock.so preauth" "$common_auth"; then
-                        # Add preauth line BEFORE pam_unix.so
-                        sed -i '/pam_unix.so/i auth required pam_faillock.so preauth' "$common_auth"
-                        print_success "Added faillock preauth to common-auth"
-                        changes_made=true
-                    else
-                        print_info "Faillock preauth already configured"
-                    fi
-                    
-                    if ! grep -q "pam_faillock.so authfail" "$common_auth"; then
-                        # Add authfail line AFTER pam_unix.so
-                        sed -i '/pam_unix.so/a auth [default=die] pam_faillock.so authfail' "$common_auth"
-                        print_success "Added faillock authfail to common-auth"
-                        changes_made=true
-                    else
-                        print_info "Faillock authfail already configured"
-                    fi
-                    
-                    print_success "PAM common-auth configured for faillock"
-                fi
-            else
-                print_error "$common_auth not found"
-            fi
-            
-            # Step 3: Configure GDM password (prevents root GUI login)
-            echo -e "\n${BOLD}Step 3: Configuring GDM to prevent root login...${NC}"
+            # Step 2: Configure GDM password (prevents root GUI login)
+            echo -e "\n${BOLD}Step 2: Configuring GDM to prevent root login...${NC}"
             print_info "This prevents root from logging in via GUI"
             
             if [[ -f "$gdm_password" ]]; then
@@ -1285,8 +1249,8 @@ EOF
                 print_warning "$gdm_password not found (GDM may not be installed)"
             fi
             
-            # Step 4: Configure SSH with pam_shells (requires valid shell)
-            echo -e "\n${BOLD}Step 4: Configuring SSH to require valid shells...${NC}"
+            # Step 3: Configure SSH with pam_shells (requires valid shell)
+            echo -e "\n${BOLD}Step 3: Configuring SSH to require valid shells...${NC}"
             print_info "This prevents users without valid shells from SSH login"
             
             if [[ -f "$sshd_pam" ]]; then
@@ -1308,73 +1272,13 @@ EOF
                 print_warning "$sshd_pam not found"
             fi
             
-            # Step 5: Create PAM configuration profiles (ADVANCED - optional)
-            echo -e "\n${BOLD}Step 5: Creating PAM configuration profiles...${NC}"
-            print_info "These enable advanced faillock features via pam-auth-update"
-            print_warning "OPTIONAL: Skip if you're unsure"
-            
-            if confirm_action "Create PAM configuration profiles for faillock?"; then
-                local faillock_config="/usr/share/pam-configs/faillock"
-                local faillock_notify_config="/usr/share/pam-configs/faillock_notify"
-                
-                # Create /usr/share/pam-configs/faillock
-                if [[ ! -f "$faillock_config" ]]; then
-                    cat > "$faillock_config" << 'EOF'
-Name: Enforce failed login attempt counter
-Default: no
-Priority: 0
-Auth-Type: Primary
-Auth:
-	[default=die] pam_faillock.so authfail
-	sufficient pam_faillock.so authsucc
-EOF
-                    print_success "Created PAM faillock config profile"
-                    changes_made=true
-                else
-                    print_info "PAM faillock config already exists"
-                fi
-                
-                # Create /usr/share/pam-configs/faillock_notify
-                if [[ ! -f "$faillock_notify_config" ]]; then
-                    cat > "$faillock_notify_config" << 'EOF'
-Name: Notify on failed login attempts
-Default: no
-Priority: 1024
-Auth-Type: Primary
-Auth:
-	requisite pam_faillock.so preauth
-EOF
-                    print_success "Created PAM faillock notify config profile"
-                    changes_made=true
-                else
-                    print_info "PAM faillock notify config already exists"
-                fi
-                
-                # Prompt to run pam-auth-update
-                print_info "PAM profiles created"
-                print_warning "You should run 'sudo pam-auth-update' to enable these profiles"
-                print_info "Select both options when prompted:"
-                print_info "  [*] Notify on failed login attempts"
-                print_info "  [*] Enforce failed login attempt counter"
-                
-                if confirm_action "Run pam-auth-update now (interactive)?"; then
-                    print_warning "Use SPACE to select, ENTER to confirm"
-                    pam-auth-update
-                fi
-            fi
-            
-            # Summary
-            print_info "  - Lock after: 5 failed attempts"
-            print_info "  - Lockout duration: 15 minutes (auto-unlock)"
-            print_info "  - Applies to: ALL users (cannot exempt specific users)"
-            print_warning "  - Admin can unlock with: faillock --user <username> --reset"
-            print_info "  - PAM common-auth: faillock enabled"
-            print_info "  - GDM: root login disabled"
-            print_info "  - SSH: shell validation enabled"
+            print_warning "NOTE: faillock.conf, GDM, and SSH configured"
+            print_warning "IMPORTANT: /etc/pam.d/common-auth NOT modified (manual setup required)"
+            print_info "To enable faillock system-wide, see option 13 for manual PAM configuration"
         fi
     else
         print_warning "Faillock not found - account lockout not configured"
-        print_info "Consider installing faillock or configuring pam_tally2 manually"
+        print_info "Consider installing faillock manually if needed"
     fi
     
     # 5. Summary and verification
@@ -1418,30 +1322,16 @@ EOF
     if [[ -f "/etc/security/faillock.conf" ]]; then
         if grep -q "^deny" /etc/security/faillock.conf 2>/dev/null; then
             local deny=$(grep "^deny" /etc/security/faillock.conf | awk '{print $3}')
-            echo -e "${GREEN}✓${NC} Account lockout: ENABLED (${deny} attempts)"
+            echo -e "${GREEN}✓${NC} Account lockout: CONFIG FILE SET (${deny} attempts)"
         else
-            echo -e "${YELLOW}!${NC} Account lockout: CONFIGURED but deny not set"
+            echo -e "${YELLOW}!${NC} Account lockout: CONFIG FILE EXISTS but deny not set"
         fi
     else
         echo -e "${YELLOW}!${NC} Account lockout: NOT CONFIGURED"
     fi
     
-    # Check PAM configurations
-    if [[ -f "/etc/pam.d/common-auth" ]]; then
-        if grep -q "pam_faillock.so preauth" /etc/pam.d/common-auth 2>/dev/null; then
-            echo -e "${GREEN}✓${NC} PAM faillock: ENABLED in common-auth"
-        else
-            echo -e "${YELLOW}!${NC} PAM faillock: NOT ENABLED in common-auth"
-        fi
-    fi
-    
-    if [[ -f "/etc/pam.d/gdm-password" ]] && grep -q "pam_succeed_if.so user != root" /etc/pam.d/gdm-password 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} GDM root login: DISABLED"
-    fi
-    
-    if [[ -f "/etc/pam.d/sshd" ]] && grep -q "pam_shells.so" /etc/pam.d/sshd 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} SSH shell validation: ENABLED"
-    fi
+    # Note: We do NOT check PAM files since we don't auto-configure them
+    echo -e "${YELLOW}!${NC} PAM files: NOT auto-configured (manual setup required)"
     
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
@@ -1474,57 +1364,235 @@ audit_services() {
     
     # Define prohibited packages
     local prohibited_packages=(
-        "aircrack-ng"
-        "apache2"
-        "dnsutils"
-        "ettercap-text-only"
-        "ettercap-graphical"
-        "ettercap-common"
-        "ftp"
-        "hping3"
-        "hydra"
-        "john"
-        "kismet"
-        "nessus"
-        "netcat"
-        "netcat-traditional"
-        "netcat-openbsd"
-        "nikto"
-        "nmap"
-        "ophcrack"
-        "rsh-client"
-        "rsh-server"
-        "samba"
-        "snort"
-        "tcpdump"
-        "telnet"
-        "telnetd"
-        "wireshark"
-        "wireshark-qt"
-        "wireshark-common"
-    )
+    # Remote Access / Backdoors / RATS
+    "telnet"
+    "telnetd"
+    "rsh-client"
+    "rsh-server"
+    "openssh-server"   # Only remove if CP image does NOT require SSH
+    "tightvncserver"
+    "x11vnc"
+    "vnc4server"
+    "teamviewer"
+    "anydesk"
+
+    # Web Servers / File Servers
+    "apache2"
+    "apache"
+    "nginx"
+    "lighttpd"
+    "httpd"
+    "jetty"
+    "tomcat9"
+    "vsftpd"
+    "ftp"
+    "proftpd-basic"
+    "samba"
+    "smbd"
+    "nmbd"
+    "nfs-kernel-server"
+    "nfs-common"
+    "rpcbind"
+    "tftp"
+    "tftpd"
+    "minidlna"
+    "transmission-daemon"
+
+    # Enumeration / Recon / Packet Analysis
+    "dnsutils"
+    "nmap"
+    "masscan"
+    "zmap"
+    "netcat"
+    "netcat-openbsd"
+    "netcat-traditional"
+    "socat"
+    "tcpdump"
+    "wireshark"
+    "wireshark-qt"
+    "wireshark-common"
+    "kismet"
+    "aircrack-ng"
+    "bettercap"
+    "hcxtools"
+
+    # MITM / Sniffing / Attacking Tools
+    "ettercap-text-only"
+    "ettercap-graphical"
+    "ettercap-common"
+    "dsniff"
+    "arpspoof"
+    "responder"
+
+    # Vulnerability Scanners / Exploit Frameworks
+    "nikto"
+    "hydra"
+    "john"
+    "ophcrack"
+    "hashcat"
+    "metasploit-framework"
+    "exploitdb"
+    "sqlmap"
+    "wafw00f"
+    "burpsuite"
+
+    # DoS / Packet Crafting Tools
+    "hping3"
+    "scapy"
+    "yersinia"
+    "slowloris"
+    "boofuzz"
+
+    # Debuggers / Reverse Engineering
+    "gdb"
+    "radare2"
+    "valgrind"
+    "strace"
+    "ltrace"
+    "ghidra"
+
+    # Proxies / Anonymity / VPN (usually unnecessary)
+    "tor"
+    "torsocks"
+    "proxychains"
+    "openvpn"
+    "wireguard-tools"
+
+    # Remote Management Daemons (insecure)
+    "snmp"
+    "snmpd"
+    "telnetd"
+    "finger"
+    "finger-server"
+
+    # Misc hacking / forensic utilities
+    "sleuthkit"
+    "foremost"
+    "volatility"
+    "regripper"
+    "bulk-extractor"
+
+    # Peer-to-peer / sharing (unneeded)
+    "bittorrent"
+    "deluge"
+    "qbittorrent"
+    "rtorrent"
+
+    # Other unnecessary packages often removed
+    "cups"            # Only disable if print scoring not required
+    "cups-browsed"
+    "avahi-daemon"    # mDNS, usually disabled in CP
+    "bluetooth"
+)
     
     # Define prohibited services
     local prohibited_services=(
+        # --- Web Servers ---
         "apache2"
         "apache"
+        "httpd"
         "nginx"
         "lighttpd"
         "jetty"
-        "httpd"
+        "tomcat"
+        "varnish"
+        "caddy"
+
+        # --- FTP / TFTP / File Transfer ---
         "vsftpd"
         "ftpd"
+        "tftpd"
+        "tftpd-hpa"
+        "pure-ftpd"
+        "proftpd"
+
+        # --- Telnet / RLogin / Rsh (insecure remote shells) ---
         "telnet"
         "telnetd"
+        "rsh"
+        "rsh-server"
+        "rlogin"
+        "rexec"
+        "rinetd"
+
+        # --- SMB / NFS / Network Shares ---
         "samba"
         "smbd"
         "nmbd"
-        "snmpd"
-        "nis"
+        "winbind"
+        "samba-ad-dc"
         "nfs-common"
         "nfs-kernel-server"
         "rpcbind"
+        "autofs"
+
+        # --- SNMP / Monitoring ---
+        "snmpd"
+        "snmp"
+        "snmptrapd"
+        "collectd"
+
+        # --- Mail Servers (never needed in CP) ---
+        "postfix"
+        "exim4"
+        "sendmail"
+        "dovecot"
+        "courier"
+        "spamassassin"
+
+        # --- Database Servers (overkill & vulnerable if misconfigured) ---
+        "mysql"
+        "mariadb"
+        "postgresql"
+        "mongodb"
+        "redis"
+        "couchdb"
+
+        # --- VPN / Tunneling Services ---
+        "openvpn"
+        "strongswan"
+        "ipsec"
+        "pptpd"
+        "wireguard"
+        "xl2tpd"
+        "sslh"
+
+        # --- Remote Desktop / VNC ---
+        "vncserver"
+        "vino"
+        "tigervnc"
+        "x11vnc"
+        "tightvnc"
+
+        # --- Printing & Avahi (not needed unless CP explicitly tests printing) ---
+        "cups"
+        "cups-browsed"
+        "avahi-daemon"
+
+        # --- UPnP / Zeroconf (auto-discovery → security risk) ---
+        "avahi-daemon"
+        "zeroconf"
+        "bonjour"
+
+        # --- Misc insecure / unnecessary ---
+        "finger"
+        "finger-server"
+        "talk"
+        "talkd"
+        "ntp"               # only disable if systemd-timesyncd exists
+        "chronyd"           # same as above
+        "rpc-statd"
+        "rwalld"
+        "rsync"             # only disable as daemon, not the command
+        "cupsd"
+        "modemmanager"
+        "whoopsie"          # crash reporting unnecessary
+        "kismet"            # wireless sniffing
+        "wireshark"         # not a service, but sometimes has daemons
+        "minidlna"          # media servers
+        "transmission-daemon" # torrent client daemon (disallowed)
     )
+
     
     # Check if SSH should be kept
     echo -e "\n${CYAN}SSH Configuration Check${NC}"
@@ -1660,14 +1728,9 @@ audit_services() {
                 # Unmask if masked
                 systemctl unmask "$svc" 2>/dev/null
                 
-                # Stop the service
-                if systemctl stop "$svc" 2>/dev/null; then
-                    print_success "Stopped: $svc"
-                fi
-                
-                # Disable the service
-                if systemctl disable "$svc" 2>/dev/null; then
-                    print_success "Disabled: $svc"
+                # Disable and stop the service immediately with --now flag
+                if systemctl disable --now "$svc" 2>/dev/null; then
+                    print_success "Disabled and stopped: $svc"
                     ((services_disabled++))
                     changes_made=true
                     log_message "DISABLED SERVICE: $svc"
@@ -1675,9 +1738,30 @@ audit_services() {
                     print_warning "Could not disable: $svc (may not exist or already disabled)"
                 fi
                 
-                # Verify it's stopped
-                if systemctl is-active "$svc" 2>/dev/null | grep -q "inactive"; then
-                    print_success "Verified: $svc is inactive"
+                # Verify it's stopped and disabled
+                local status=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+                local enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "disabled")
+                
+                if [[ "$status" == "inactive" && "$enabled" == "disabled" ]]; then
+                    print_success "Verified: $svc is stopped and disabled"
+                else
+                    print_warning "Service state: active=$status, enabled=$enabled"
+                fi
+                
+                # Ask if user wants to purge the package too
+                if confirm_action "Also purge/remove the package for $svc?"; then
+                    echo -e "${CYAN}Attempting to remove package: $svc${NC}"
+                    
+                    # Try to find and remove the package
+                    if apt purge -y "$svc" 2>/dev/null; then
+                        print_success "Purged package: $svc"
+                        log_message "PURGED PACKAGE: $svc"
+                    elif apt remove --purge -y "$svc" 2>/dev/null; then
+                        print_success "Removed package: $svc"
+                        log_message "REMOVED PACKAGE: $svc"
+                    else
+                        print_info "Package $svc not found or already removed"
+                    fi
                 fi
             else
                 print_info "Skipped disabling: $svc"
@@ -4241,18 +4325,66 @@ manual_pam_guide() {
     press_enter
     
     echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${BOLD}STEP 5: Add pam_faillock to /etc/pam.d/common-auth${NC}"
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}What it does:${NC} Enables account lockout after failed login attempts"
+    echo -e "${RED}WARNING: This affects ALL users including admins!${NC}"
+    echo ""
+    echo -e "${GREEN}Commands:${NC}"
+    echo -e "  ${CYAN}sudo cp /etc/pam.d/common-auth /etc/pam.d/common-auth.bak${NC}"
+    echo -e "  ${CYAN}sudo nano /etc/pam.d/common-auth${NC}"
+    echo ""
+    echo -e "${YELLOW}Find this line:${NC}"
+    echo -e "  ${WHITE}auth    [success=1 default=ignore]      pam_unix.so${NC}"
+    echo ""
+    echo -e "${YELLOW}Add THIS line BEFORE it:${NC}"
+    echo -e "  ${GREEN}auth    required                        pam_faillock.so preauth${NC}"
+    echo ""
+    echo -e "${YELLOW}Add THIS line AFTER it:${NC}"
+    echo -e "  ${GREEN}auth    [default=die]                   pam_faillock.so authfail${NC}"
+    echo ""
+    echo -e "${YELLOW}Final result should look like:${NC}"
+    echo -e "  ${GREEN}auth    required                        pam_faillock.so preauth${NC}"
+    echo -e "  ${WHITE}auth    [success=1 default=ignore]      pam_unix.so${NC}"
+    echo -e "  ${GREEN}auth    [default=die]                   pam_faillock.so authfail${NC}"
+    echo -e "  ${WHITE}auth    requisite                       pam_deny.so${NC}"
+    echo -e "  ${WHITE}auth    required                        pam_permit.so${NC}"
+    echo ""
+    echo -e "${YELLOW}Save: Ctrl+O, Enter, Ctrl+X${NC}"
+    echo ""
+    echo -e "${RED}${BOLD}TEST IMMEDIATELY:${NC} ${CYAN}sudo whoami${NC}"
+    echo -e "${RED}If sudo fails, you have 5 attempts before lockout!${NC}"
+    echo ""
+    echo -e "${YELLOW}Unlock a locked account:${NC}"
+    echo -e "  ${CYAN}sudo faillock --user <username> --reset${NC}"
+    echo ""
+    echo -e "${YELLOW}Configuration file (already set by option 4):${NC}"
+    echo -e "  ${CYAN}/etc/security/faillock.conf${NC}"
+    echo -e "  ${WHITE}deny = 5${NC}"
+    echo -e "  ${WHITE}unlock_time = 900${NC}"
+    echo ""
+    press_enter
+    
+    echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}${BOLD}VERIFICATION${NC}"
     echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "${YELLOW}Check current configuration:${NC}"
     echo -e "  ${CYAN}grep -E 'pam_pwquality|pam_unix' /etc/pam.d/common-password${NC}"
+    echo -e "  ${CYAN}grep -E 'pam_faillock|pam_unix' /etc/pam.d/common-auth${NC}"
     echo ""
     echo -e "${YELLOW}Expected output should show:${NC}"
     echo -e "  ${GREEN}password required pam_pwquality.so retry=3${NC}"
     echo -e "  ${GREEN}password [success=1 default=ignore] pam_unix.so obscure use_authtok minlen=10 remember=5${NC}"
+    echo -e "  ${GREEN}auth required pam_faillock.so preauth${NC}"
+    echo -e "  ${GREEN}auth [default=die] pam_faillock.so authfail${NC}"
     echo ""
     echo -e "${YELLOW}Check pwquality.conf:${NC}"
     echo -e "  ${CYAN}grep -E '^minlen|^dcredit|^ucredit|^lcredit|^ocredit' /etc/security/pwquality.conf${NC}"
+    echo ""
+    echo -e "${YELLOW}Check faillock.conf:${NC}"
+    echo -e "  ${CYAN}grep -E '^deny|^unlock_time' /etc/security/faillock.conf${NC}"
     echo ""
     echo -e "${YELLOW}Test password change:${NC}"
     echo -e "  ${CYAN}passwd${NC}  (try a weak password - it should be rejected)"
@@ -4276,6 +4408,7 @@ manual_pam_guide() {
     echo -e "${YELLOW}2. If locked out, reboot and restore VM snapshot${NC}"
     echo -e "${YELLOW}3. Keep your terminal open and test before closing${NC}"
     echo -e "${YELLOW}4. Don't log out until you've verified sudo works${NC}"
+    echo -e "${YELLOW}5. With faillock enabled, 5 wrong sudo attempts = locked out${NC}"
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════${NC}"
     echo ""
     
@@ -4300,7 +4433,7 @@ show_menu() {
     echo -e "${GREEN} 9)${NC} Harden SSH Configuration"
     echo -e "${GREEN}10)${NC} Harden FTP Server (vsftpd)"
     echo -e "${GREEN}11)${NC} Enable Security Features"
-    echo -e "${YELLOW}12)${NC} Enforce Password Complexity ${RED}(⚠️  SNAPSHOT FIRST!)${NC}"
+    echo -e "${YELLOW}12)${NC} Enforce Password Complexity ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
     echo -e "${CYAN}13)${NC} Manual PAM Configuration Guide ${YELLOW}(Safe - No Auto-Edit)${NC}"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
