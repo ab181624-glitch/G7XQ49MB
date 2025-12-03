@@ -8,7 +8,7 @@
 set -e
 
 # Configuration
-GITHUB_RAW_URL="https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/package_whitelist.txt"
+GITHUB_RAW_URL="https://github.com/ab181624-glitch/G7XQ49MB/raw/refs/heads/main/package_whitelist.txt"
 WHITELIST_FILE="/tmp/package_whitelist.txt"
 NEW_PACKAGES_FILE="/tmp/new_whitelist_additions.txt"
 AUDIT_LOG="/tmp/package_audit.log"
