@@ -5,13 +5,12 @@
 # Compares installed packages against a whitelist and prompts for actions
 #############################################################################
 
-set -e
-
 # Configuration
 GITHUB_RAW_URL="https://github.com/ab181624-glitch/G7XQ49MB/raw/refs/heads/main/package_whitelist.txt"
-WHITELIST_FILE="/tmp/package_whitelist.txt"
-NEW_PACKAGES_FILE="/tmp/new_whitelist_additions.txt"
-AUDIT_LOG="/tmp/package_audit.log"
+WORK_DIR="${HOME}/.package_audit"
+WHITELIST_FILE="${WORK_DIR}/package_whitelist.txt"
+NEW_PACKAGES_FILE="${WORK_DIR}/new_whitelist_additions.txt"
+AUDIT_LOG="${WORK_DIR}/package_audit.log"
 
 # Colors for output
 RED='\033[0;31m'
@@ -211,7 +210,7 @@ generate_sync_instructions() {
     echo ""
     
     # Create a ready-to-paste file
-    local update_file="/tmp/whitelist_update_$(date +%s).txt"
+    local update_file="${WORK_DIR}/whitelist_update_$(date +%s).txt"
     cat "$NEW_PACKAGES_FILE" > "$update_file"
     echo -e "${GREEN}✓ Update file saved to: ${YELLOW}$update_file${NC}"
     
@@ -224,6 +223,9 @@ generate_sync_instructions() {
 
 main() {
     print_header "Package Audit Script"
+    
+    # Create work directory if it doesn't exist
+    mkdir -p "$WORK_DIR"
     
     # Initialize log
     echo "=== Package Audit Started ===" > "$AUDIT_LOG"
@@ -253,17 +255,25 @@ main() {
     log_message "Total installed packages: ${#INSTALLED[@]}"
     
     # Load whitelist into associative array for O(1) lookup
+    # Also track wildcard patterns (entries ending with *)
     declare -A WHITELIST_MAP
+    declare -a WHITELIST_PATTERNS
     if [ -s "$WHITELIST_FILE" ]; then
         local count=0
         while IFS= read -r package; do
             # Skip empty lines and comments
             [[ -z "$package" || "$package" =~ ^[[:space:]]*# ]] && continue
-            WHITELIST_MAP["$package"]=1
+            
+            # Check if it's a wildcard pattern (ends with *)
+            if [[ "$package" == *\* ]]; then
+                WHITELIST_PATTERNS+=("$package")
+            else
+                WHITELIST_MAP["$package"]=1
+            fi
             ((count++))
         done < "$WHITELIST_FILE"
-        echo -e "${GREEN}✓ Loaded $count whitelisted packages${NC}"
-        log_message "Whitelisted packages: $count"
+        echo -e "${GREEN}✓ Loaded $count whitelisted packages/patterns${NC}"
+        log_message "Whitelisted packages: $count (${#WHITELIST_PATTERNS[@]} patterns)"
     else
         echo -e "${YELLOW}⚠ Whitelist is empty${NC}"
         log_message "Whitelist is empty"
@@ -274,7 +284,23 @@ main() {
     
     NOT_WHITELISTED=()
     for package in "${INSTALLED[@]}"; do
-        if [[ ! -v WHITELIST_MAP["$package"] ]]; then
+        # First check exact match (O(1))
+        if [[ -v WHITELIST_MAP["$package"] ]]; then
+            continue
+        fi
+        
+        # Then check wildcard patterns
+        local matched=0
+        for pattern in "${WHITELIST_PATTERNS[@]}"; do
+            # Remove the trailing * and check if package starts with pattern
+            local prefix="${pattern%\*}"
+            if [[ "$package" == "$prefix"* ]]; then
+                matched=1
+                break
+            fi
+        done
+        
+        if [[ $matched -eq 0 ]]; then
             NOT_WHITELISTED+=("$package")
         fi
     done
