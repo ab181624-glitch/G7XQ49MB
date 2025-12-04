@@ -1163,121 +1163,11 @@ configure_password_policy() {
     print_warning "PAM files must be edited manually to prevent sudo lockout"
     print_info "Use option 13 'Manual PAM Configuration Guide' for instructions"
     
-    # 4. Configure account lockout policy (system-wide)
-    echo -e "\n${BOLD}Configuring system-wide account lockout...${NC}"
-    print_info "Account lockout via faillock requires manual PAM configuration"
-    print_warning "IMPORTANT: common-auth modification disabled to prevent lockouts"
-    print_info "See option 13 for manual PAM common-auth configuration"
-    
-    # Only configure faillock.conf, DO NOT modify PAM files
-    if command -v faillock &>/dev/null || [[ -f "/usr/sbin/faillock" ]]; then
-        print_info "System has 'faillock' available for account lockout"
-        
-        if confirm_action "Configure account lockout (faillock.conf, GDM, SSH)?"; then
-            local faillock_conf="/etc/security/faillock.conf"
-            local gdm_password="/etc/pam.d/gdm-password"
-            local sshd_pam="/etc/pam.d/sshd"
-            
-            # Step 1: Configure faillock.conf
-            echo -e "${BOLD}Step 1: Configuring faillock.conf...${NC}"
-            if [[ ! -f "$faillock_conf" ]]; then
-                # Create new faillock.conf
-                cat > "$faillock_conf" << 'EOF'
-# CyberPatriot Account Lockout Configuration
-# Lock account after 5 failed attempts for 15 minutes (900 seconds)
-# WARNING: This affects ALL users including admins
-deny = 5
-unlock_time = 900
-audit
-silent
-EOF
-                print_success "Created faillock.conf with lockout policy"
-                changes_made=true
-            else
-                # Update existing file
-                cp "$faillock_conf" "${faillock_conf}.bak.$(date +%Y%m%d_%H%M%S)"
-                
-                # Ensure deny and unlock_time are set
-                if grep -q "^deny" "$faillock_conf"; then
-                    sed -i "s/^deny.*/deny = 5/" "$faillock_conf"
-                else
-                    echo "deny = 5" >> "$faillock_conf"
-                fi
-                
-                if grep -q "^unlock_time" "$faillock_conf"; then
-                    sed -i "s/^unlock_time.*/unlock_time = 900/" "$faillock_conf"
-                else
-                    echo "unlock_time = 900" >> "$faillock_conf"
-                fi
-                
-                # Add audit if not present
-                if ! grep -q "^audit" "$faillock_conf"; then
-                    echo "audit" >> "$faillock_conf"
-                fi
-                
-                # Add silent if not present
-                if ! grep -q "^silent" "$faillock_conf"; then
-                    echo "silent" >> "$faillock_conf"
-                fi
-                
-                print_success "Updated faillock configuration"
-                changes_made=true
-            fi
-            
-            # Step 2: Configure GDM password (prevents root GUI login)
-            echo -e "\n${BOLD}Step 2: Configuring GDM to prevent root login...${NC}"
-            print_info "This prevents root from logging in via GUI"
-            
-            if [[ -f "$gdm_password" ]]; then
-                if confirm_action "Prevent root from using GUI login (GDM)?"; then
-                    cp "$gdm_password" "${gdm_password}.bak.$(date +%Y%m%d_%H%M%S)"
-                    print_success "Created backup of gdm-password"
-                    
-                    # Check if the line already exists
-                    if ! grep -q "pam_succeed_if.so user != root" "$gdm_password"; then
-                        # Add the line at the beginning of auth section
-                        sed -i '/@include common-auth/i auth required pam_succeed_if.so user != root' "$gdm_password"
-                        print_success "Added root restriction to GDM"
-                        changes_made=true
-                    else
-                        print_info "GDM root restriction already configured"
-                    fi
-                fi
-            else
-                print_warning "$gdm_password not found (GDM may not be installed)"
-            fi
-            
-            # Step 3: Configure SSH with pam_shells (requires valid shell)
-            echo -e "\n${BOLD}Step 3: Configuring SSH to require valid shells...${NC}"
-            print_info "This prevents users without valid shells from SSH login"
-            
-            if [[ -f "$sshd_pam" ]]; then
-                if confirm_action "Add shell validation to SSH PAM?"; then
-                    cp "$sshd_pam" "${sshd_pam}.bak.$(date +%Y%m%d_%H%M%S)"
-                    print_success "Created backup of sshd PAM config"
-                    
-                    # Check if pam_shells is already configured
-                    if ! grep -q "pam_shells.so" "$sshd_pam"; then
-                        # Add pam_shells at the beginning of auth section
-                        sed -i '/@include common-auth/i auth required pam_shells.so' "$sshd_pam"
-                        print_success "Added shell validation to SSH"
-                        changes_made=true
-                    else
-                        print_info "SSH shell validation already configured"
-                    fi
-                fi
-            else
-                print_warning "$sshd_pam not found"
-            fi
-            
-            print_warning "NOTE: faillock.conf, GDM, and SSH configured"
-            print_warning "IMPORTANT: /etc/pam.d/common-auth NOT modified (manual setup required)"
-            print_info "To enable faillock system-wide, see option 13 for manual PAM configuration"
-        fi
-    else
-        print_warning "Faillock not found - account lockout not configured"
-        print_info "Consider installing faillock manually if needed"
-    fi
+    # 4. Account lockout moved to option 12
+    echo -e "\n${BOLD}Account Lockout Configuration${NC}"
+    print_info "Account lockout (faillock) is now configured in option 12"
+    print_info "Option 12: Complete Password Complexity & PAM Configuration"
+    print_warning "That option will set up faillock.conf AND enable it via pam-auth-update"
     
     # 5. Summary and verification
     echo -e "\n${BOLD}System-Wide Password Policy Summary:${NC}"
@@ -1316,20 +1206,8 @@ EOF
         echo -e "${YELLOW}!${NC} Password complexity: NOT CONFIGURED"
     fi
     
-    # Check account lockout
-    if [[ -f "/etc/security/faillock.conf" ]]; then
-        if grep -q "^deny" /etc/security/faillock.conf 2>/dev/null; then
-            local deny=$(grep "^deny" /etc/security/faillock.conf | awk '{print $3}')
-            echo -e "${GREEN}✓${NC} Account lockout: CONFIG FILE SET (${deny} attempts)"
-        else
-            echo -e "${YELLOW}!${NC} Account lockout: CONFIG FILE EXISTS but deny not set"
-        fi
-    else
-        echo -e "${YELLOW}!${NC} Account lockout: NOT CONFIGURED"
-    fi
-    
-    # Note: We do NOT check PAM files since we don't auto-configure them
-    echo -e "${YELLOW}!${NC} PAM files: NOT auto-configured (manual setup required)"
+    # Account lockout note - configured in option 12
+    echo -e "${BLUE}[i]${NC} Account lockout: Configure in option 12 (Complete Password & PAM Config)"
     
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
@@ -4203,6 +4081,86 @@ complete_password_pam_configuration() {
             print_success "Password rules configured"
             print_info "  Min length: 8 | Digit: 1 | Upper: 1 | Lower: 1 | Special: 1"
             changes_made=true
+        fi
+    fi
+    
+    # Step 3.5: Configure faillock using pam-auth-update (CyberPatriot method)
+    echo -e "\n${BOLD}Step 3.5: Configure Account Lockout (pam-auth-update)${NC}"
+    print_info "This uses the CyberPatriot-recommended pam-auth-update method"
+    
+    if confirm_action "Configure account lockout using pam-auth-update?"; then
+        local pam_config_dir="/usr/share/pam-configs"
+        
+        # Create the directory if it doesn't exist
+        mkdir -p "$pam_config_dir"
+        
+        # Step 3.5a: Create faillock config (authfail)
+        echo -e "${CYAN}Creating faillock PAM configuration files...${NC}"
+        
+        cat > "$pam_config_dir/faillock" << 'EOF'
+Name: Lockout on failed logins
+Default: no
+Priority: 0
+Auth-Type: Primary
+Auth:
+	[default=die] pam_faillock.so authfail
+EOF
+        print_success "Created $pam_config_dir/faillock"
+        
+        # Step 3.5b: Create faillock_reset config (authsucc)
+        cat > "$pam_config_dir/faillock_reset" << 'EOF'
+Name: Reset lockout on success
+Default: no
+Priority: 0
+Auth-Type: Additional
+Auth:
+	required pam_faillock.so authsucc
+EOF
+        print_success "Created $pam_config_dir/faillock_reset"
+        
+        # Step 3.5c: Create faillock_notify config (preauth)
+        cat > "$pam_config_dir/faillock_notify" << 'EOF'
+Name: Notify on account lockout
+Default: no
+Priority: 1024
+Auth-Type: Primary
+Auth:
+	requisite pam_faillock.so preauth
+EOF
+        print_success "Created $pam_config_dir/faillock_notify"
+        
+        # Step 3.5d: Run pam-auth-update to enable the profiles
+        echo -e "\n${CYAN}Enabling faillock profiles with pam-auth-update...${NC}"
+        print_warning "This will enable the faillock PAM modules system-wide"
+        
+        if confirm_action "Run pam-auth-update to enable faillock?"; then
+            # Use pam-auth-update with --enable to automatically select the profiles
+            DEBIAN_FRONTEND=noninteractive pam-auth-update --enable faillock
+            DEBIAN_FRONTEND=noninteractive pam-auth-update --enable faillock_reset
+            DEBIAN_FRONTEND=noninteractive pam-auth-update --enable faillock_notify
+            
+            if [[ $? -eq 0 ]]; then
+                print_success "Faillock PAM modules enabled via pam-auth-update"
+                changes_made=true
+                
+                echo ""
+                echo -e "${GREEN}${BOLD}Account lockout is now ACTIVE${NC}"
+                echo -e "${YELLOW}Settings (from /etc/security/faillock.conf):${NC}"
+                echo -e "  - Failed attempts before lockout: 5"
+                echo -e "  - Lockout duration: 900 seconds (15 minutes)"
+                echo ""
+                echo -e "${RED}${BOLD}⚠️  CRITICAL: TEST SUDO NOW ⚠️${NC}"
+                echo -e "${CYAN}Run: sudo whoami${NC}"
+                echo -e "${YELLOW}If it fails, you have 5 attempts before lockout!${NC}"
+                echo ""
+                press_enter
+            else
+                print_error "Failed to enable faillock with pam-auth-update"
+                print_info "You may need to run 'sudo pam-auth-update' manually"
+            fi
+        else
+            print_info "Faillock profiles created but not enabled"
+            print_info "Run 'sudo pam-auth-update' manually to enable them"
         fi
     fi
     
