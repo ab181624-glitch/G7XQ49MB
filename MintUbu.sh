@@ -2548,9 +2548,7 @@ EOF
         systemctl start unattended-upgrades 2>/dev/null
         print_success "Enabled automatic security updates service"
     fi
-    
-    fi
-    
+
     print_warning "Found ${#found_files[@]} media file(s)"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
