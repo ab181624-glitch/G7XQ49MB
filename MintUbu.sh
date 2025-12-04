@@ -975,12 +975,10 @@ configure_password_policy() {
     # Remove cracklib (conflicts with pwquality)
     echo -e "\n${BOLD}Removing cracklib (conflicts with pwquality)...${NC}"
     if dpkg -l | grep -q "libpam-cracklib"; then
-        if confirm_action "Remove libpam-cracklib package?"; then
-            apt remove -y libpam-cracklib 2>/dev/null
-            apt purge -y libpam-cracklib 2>/dev/null
-            print_success "Removed cracklib package"
-            changes_made=true
-        fi
+        apt remove -y libpam-cracklib 2>/dev/null
+        apt purge -y libpam-cracklib 2>/dev/null
+        print_success "Removed cracklib package"
+        changes_made=true
     else
         print_success "cracklib not installed"
     fi
@@ -2551,6 +2549,75 @@ EOF
         print_success "Enabled automatic security updates service"
     fi
     
+    fi
+    
+    print_warning "Found ${#found_files[@]} media file(s)"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    # Ask if user wants to review files
+    if ! confirm_action "Review and delete media files?"; then
+        print_info "Media file removal cancelled"
+        press_enter
+        return
+    fi
+    
+    # Review each file
+    echo -e "\n${BOLD}Reviewing media files...${NC}"
+    echo -e "${YELLOW}You will be prompted for each file${NC}\n"
+    
+    for file in "${found_files[@]}"; do
+        # Get file info
+        local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
+        local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
+        local file_modified=$(stat -c "%y" "$file" 2>/dev/null | cut -d' ' -f1)
+        
+        # Display file info
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BOLD}File:${NC} $file"
+        echo -e "${BOLD}Size:${NC} $file_size"
+        echo -e "${BOLD}Owner:${NC} $file_owner"
+        echo -e "${BOLD}Modified:${NC} $file_modified"
+        
+        # Show file type (if available)
+        if command -v file &>/dev/null; then
+            local file_type=$(file -b "$file" 2>/dev/null)
+            echo -e "${BOLD}Type:${NC} $file_type"
+        fi
+        
+        # Prompt to delete
+        if confirm_action "Delete this file?"; then
+            if rm -f "$file" 2>/dev/null; then
+                print_success "Deleted: $file"
+                ((files_removed++))
+                changes_made=true
+                
+                # Log to audit log
+                log_message "REMOVED MEDIA FILE: $file (size: $file_size, owner: $file_owner)"
+            else
+                print_error "Failed to delete: $file (check permissions)"
+            fi
+        else
+            print_info "Kept: $file"
+            ((files_kept++))
+        fi
+        
+        echo ""
+    done
+    
+    # Final summary
+    echo -e "${BOLD}Media File Removal Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}[i]${NC} Total files found: ${#found_files[@]}"
+    echo -e "${GREEN}✓${NC} Files removed: $files_removed"
+    echo -e "${YELLOW}!${NC} Files kept: $files_kept"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Media file cleanup completed"
+        print_info "Removed files are permanently deleted"
+    else
+        print_info "No files were removed"
+    fi
     # 2. Update package lists (REQUIRED)
     echo -e "\n${BOLD}Step 2: Update Package Lists${NC}"
     if confirm_action "Update apt package lists?"; then
@@ -4041,39 +4108,28 @@ EOF
 }
 
 #############################################
-# Task 12: Safe Password Complexity (No Lockout Risk)
+# Task 12: Complete Password Complexity & PAM Configuration
 #############################################
 
-enforce_password_complexity() {
-    print_header "SAFE PASSWORD COMPLEXITY ENFORCEMENT"
+complete_password_pam_configuration() {
+    print_header "COMPLETE PASSWORD COMPLEXITY & PAM CONFIGURATION"
     print_warning "⚠️  CRITICAL: TAKE A VM SNAPSHOT BEFORE PROCEEDING ⚠️"
     echo ""
-    print_info "This function enables REAL password complexity enforcement"
-    print_info "This is REQUIRED for CyberPatriot points but has lockout risk"
+    print_info "This consolidated module handles ALL password complexity and PAM configuration"
+    print_info "REQUIRED for CyberPatriot points but has lockout risk"
     echo ""
     
     local changes_made=false
-    
-    # Remove cracklib (conflicts with pwquality)
-    echo -e "\n${BOLD}Removing cracklib (conflicts with pwquality)...${NC}"
-    if dpkg -l | grep -q "libpam-cracklib"; then
-        print_info "Removing libpam-cracklib package..."
-        apt remove -y libpam-cracklib 2>/dev/null
-        apt purge -y libpam-cracklib 2>/dev/null
-        print_success "Removed cracklib package"
-        changes_made=true
-    else
-        print_success "cracklib not installed"
-    fi
     
     # Safety check
     echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${RED}${BOLD}                    ⚠️  WARNING ⚠️${NC}"
     echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}Enabling PAM password complexity CAN cause lockouts if:${NC}"
-    echo -e "${YELLOW}  • Existing user passwords don't meet new requirements${NC}"
-    echo -e "${YELLOW}  • You forget your password after changing it${NC}"
-    echo -e "${YELLOW}  • PAM configuration gets corrupted${NC}"
+    echo -e "${YELLOW}This module will:${NC}"
+    echo -e "${YELLOW}  1. Remove cracklib (conflicts with pwquality)${NC}"
+    echo -e "${YELLOW}  2. Install libpam-pwquality${NC}"
+    echo -e "${YELLOW}  3. Configure password complexity rules${NC}"
+    echo -e "${YELLOW}  4. Provide manual PAM configuration guide${NC}"
     echo ""
     echo -e "${CYAN}${BOLD}REQUIRED BEFORE CONTINUING:${NC}"
     echo -e "${GREEN}  1. Take a VM snapshot NOW${NC}"
@@ -4089,15 +4145,29 @@ enforce_password_complexity() {
         return
     fi
     
-    # Step 1: Install libpam-pwquality (SAFE - just installs package)
-    echo -e "\n${BOLD}Step 1: Install Password Quality Library${NC}"
+    # Step 1: Remove cracklib (conflicts with pwquality)
+    echo -e "\n${BOLD}Step 1: Removing cracklib (conflicts with pwquality)...${NC}"
+    if dpkg -l | grep -q "libpam-cracklib"; then
+        print_info "Removing libpam-cracklib package..."
+        DEBIAN_FRONTEND=noninteractive apt remove -y -o Dpkg::Options::="--force-confold" libpam-cracklib 2>/dev/null
+        DEBIAN_FRONTEND=noninteractive apt purge -y -o Dpkg::Options::="--force-confold" libpam-cracklib 2>/dev/null
+        print_success "Removed cracklib package"
+        changes_made=true
+    else
+        print_success "cracklib not installed"
+    fi
+    
+    # Step 2: Install libpam-pwquality
+    echo -e "\n${BOLD}Step 2: Install Password Quality Library${NC}"
     
     if ! dpkg -l | grep -q "^ii.*libpam-pwquality"; then
         if confirm_action "Install libpam-pwquality?"; then
-            apt-get update -qq
-            apt-get install -y libpam-pwquality
+            print_info "Installing with --force-confold to preserve existing PAM configs..."
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confold" libpam-pwquality
             if [[ $? -eq 0 ]]; then
                 print_success "libpam-pwquality installed"
+                print_success "Existing PAM configurations preserved"
                 changes_made=true
             else
                 print_error "Failed to install libpam-pwquality"
@@ -4109,8 +4179,8 @@ enforce_password_complexity() {
         print_success "libpam-pwquality already installed"
     fi
     
-    # Step 2: Configure /etc/security/pwquality.conf (SAFE - just sets rules)
-    echo -e "\n${BOLD}Step 2: Configure Password Rules${NC}"
+    # Step 3: Configure /etc/security/pwquality.conf
+    echo -e "\n${BOLD}Step 3: Configure Password Rules${NC}"
     
     local pwquality_conf="/etc/security/pwquality.conf"
     
@@ -4138,90 +4208,27 @@ enforce_password_complexity() {
         fi
     fi
     
-    # Step 3: Manual PAM Configuration Instructions
-    echo -e "\n${BOLD}Step 3: PAM Files - Manual Configuration Required${NC}"
+    # Step 4: Manual PAM Configuration Guide
+    echo -e "\n${BOLD}Step 4: Manual PAM Configuration Guide${NC}"
     echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${RED}${BOLD}⚠️  MUST BE DONE MANUALLY TO AVOID LOCKOUT ⚠️${NC}"
+    echo -e "${RED}${BOLD}⚠️  PAM FILES MUST BE EDITED MANUALLY ⚠️${NC}"
     echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
     echo ""
-    print_warning "Automatic PAM editing disabled - too risky for sudo lockout"
-    print_info "Use option 13 'Manual PAM Configuration Guide' for detailed instructions"
+    print_warning "Automatic PAM editing disabled to prevent sudo lockout"
+    print_info "Follow the instructions below carefully - test sudo after EACH step"
     echo ""
     
-    local common_password="/etc/pam.d/common-password"
-    
-    # Just check current status, don't modify
-    if [[ -f "$common_password" ]]; then
-        if grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
-            print_success "PAM password quality is already enabled"
-        else
-            print_warning "PAM password quality NOT enabled (use option 13 for instructions)"
-        fi
-        
-        if grep "pam_unix.so" "$common_password" | grep -q "minlen=" 2>/dev/null; then
-            print_success "Minimum password length is configured"
-        else
-            print_info "Minimum password length not configured in PAM"
-        fi
-        
-        if grep "pam_unix.so" "$common_password" | grep -q "remember=" 2>/dev/null; then
-            print_success "Password history is enabled"
-        else
-            print_info "Password history not configured"
-        fi
+    if ! confirm_action "Continue to PAM configuration guide?"; then
+        print_info "Skipped PAM guide - pwquality.conf configured but not enforced via PAM"
+        press_enter
+        return
     fi
     
-    # Summary
-    echo -e "\n${BOLD}Password Complexity Enforcement Summary:${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    
-    if [[ -f "$pwquality_conf" ]] && grep -q "^minlen" "$pwquality_conf" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Password rules configured in pwquality.conf"
-    fi
-    
-    if [[ -f "$common_password" ]] && grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} PAM enforcement ENABLED (passwords will be checked)"
-    else
-        echo -e "${YELLOW}!${NC} PAM enforcement NOT ENABLED (rules are advisory only)"
-    fi
-    
-    if [[ -f "$common_password" ]] && grep "pam_unix.so" "$common_password" | grep -q "remember=" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Password history enabled (remember=5)"
-    else
-        echo -e "${YELLOW}!${NC} Password history not enabled"
-    fi
-    
-    if [[ -f "$common_password" ]] && grep "pam_unix.so" "$common_password" | grep -q "minlen=" 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Minimum password length enforced (minlen=10)"
-    else
-        echo -e "${YELLOW}!${NC} Minimum password length not enforced in PAM"
-    fi
-    
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    
-    if grep -q "pam_pwquality.so" "$common_password" 2>/dev/null; then
-        echo ""
-        echo -e "${RED}${BOLD}⚠️  POST-CONFIGURATION TESTING REQUIRED ⚠️${NC}"
-        echo ""
-        echo -e "${YELLOW}Run these tests NOW:${NC}"
-        echo -e "${CYAN}  1. Test sudo:${NC} sudo whoami"
-        echo -e "${CYAN}  2. Test password change:${NC} passwd"
-        echo -e "${CYAN}  3. If anything fails, reboot and restore snapshot${NC}"
-        echo ""
-    fi
-    
-    if [[ "$changes_made" == true ]]; then
-        print_success "Password complexity enforcement configured"
-    else
-        print_info "No changes were made"
-    fi
-    
-    print_header "PASSWORD COMPLEXITY ENFORCEMENT COMPLETE"
-    press_enter
+    manual_pam_guide
 }
 
 #############################################
-# Task 13: Manual PAM Configuration Guide
+# Manual PAM Configuration Guide (Helper Function)
 #############################################
 
 manual_pam_guide() {
@@ -4425,7 +4432,7 @@ show_menu() {
     echo -e "${GREEN} 1)${NC} User Auditing"
     echo -e "${GREEN} 2)${NC} Disable Root Login"
     echo -e "${GREEN} 3)${NC} Configure Firewall (UFW)"
-    echo -e "${GREEN} 4)${NC} Configure Password Policies"
+    echo -e "${GREEN} 4)${NC} Configure Password Policies (Aging, Faillock)"
     echo -e "${GREEN} 5)${NC} Audit Services"
     echo -e "${GREEN} 6)${NC} Audit File Permissions"
     echo -e "${GREEN} 7)${NC} Update System"
@@ -4433,8 +4440,7 @@ show_menu() {
     echo -e "${GREEN} 9)${NC} Harden SSH Configuration"
     echo -e "${GREEN}10)${NC} Harden FTP Server (vsftpd)"
     echo -e "${GREEN}11)${NC} Enable Security Features"
-    echo -e "${YELLOW}12)${NC} Enforce Password Complexity ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
-    echo -e "${CYAN}13)${NC} Manual PAM Configuration Guide ${YELLOW}(Safe - No Auto-Edit)${NC}"
+    echo -e "${RED}12)${NC} Complete Password Complexity & PAM Config ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -4465,8 +4471,7 @@ main() {
             9) harden_ssh ;;
             10) harden_ftp ;;
             11) enable_security_features ;;
-            12) enforce_password_complexity ;;
-            13) manual_pam_guide ;;
+            12) complete_password_pam_configuration ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
