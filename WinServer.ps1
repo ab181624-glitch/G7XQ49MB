@@ -116,21 +116,18 @@ function Invoke-UserAuditing {
     
     # Get secure admin password
     Write-Host "`nEnter the secure password for admin accounts:" -ForegroundColor Cyan
-    $securePass1 = Read-Host -AsSecureString
+    $securePass1 = Read-Host
     Write-Host "Confirm secure password:" -ForegroundColor Cyan
-    $securePass2 = Read-Host -AsSecureString
+    $securePass2 = Read-Host
     
     # Compare passwords
-    $pass1Plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass1))
-    $pass2Plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass2))
-    
-    if ($pass1Plain -ne $pass2Plain) {
+    if ($securePass1 -ne $securePass2) {
         Print-Error "Passwords do not match!"
         Press-Enter
         return
     }
     
-    $script:SecureAdminPassword = $pass1Plain
+    $script:SecureAdminPassword = $securePass1
     Print-Success "Secure admin password set"
     
     # Get list of authorized admins
@@ -145,6 +142,7 @@ function Invoke-UserAuditing {
         
         $script:AuthorizedAdmins[$adminUser] = $script:SecureAdminPassword
         Print-Success "Added admin: $adminUser"
+        Read-Host "Enter password for $adminUser (will be set to secure password)"
     }
     
     # Get list of authorized regular users
@@ -404,9 +402,36 @@ function Invoke-UserAuditing {
     }
     
     # ========================================
-    # STEP 8: Disable Built-in Administrator (Optional)
+    # STEP 8: Apply Secure Password to ALL Users
     # ========================================
-    Print-Header "STEP 8: DISABLE BUILT-IN ADMINISTRATOR"
+    Print-Header "STEP 8: APPLY SECURE PASSWORD TO ALL USERS"
+    
+    Print-Info "Applying secure password to ALL user accounts..."
+    $allUsers = Get-LocalUser | Where-Object { 
+        $_.Name -notmatch '^(DefaultAccount|WDAGUtilityAccount|Guest)$' 
+    }
+    
+    if (Confirm-Action "Apply secure admin password to ALL $($allUsers.Count) user accounts?") {
+        $passwordsSet = 0
+        foreach ($user in $allUsers) {
+            try {
+                $user | Set-LocalUser -Password (ConvertTo-SecureString $script:SecureAdminPassword -AsPlainText -Force) -ErrorAction Stop
+                Print-Success "Set password for: $($user.Name)"
+                $passwordsSet++
+            }
+            catch {
+                Print-Error "Failed to set password for '$($user.Name)': $_"
+            }
+        }
+        Print-Success "Applied password to $passwordsSet user account(s)"
+    } else {
+        Print-Warning "Skipped applying password to all users"
+    }
+    
+    # ========================================
+    # STEP 9: Disable Built-in Administrator (Optional)
+    # ========================================
+    Print-Header "STEP 9: DISABLE BUILT-IN ADMINISTRATOR"
     
     $builtinAdmin = Get-LocalUser | Where-Object { $_.SID -like "*-500" }
     if ($builtinAdmin -and $builtinAdmin.Enabled) {
@@ -428,6 +453,40 @@ function Invoke-UserAuditing {
     }
     
     # ========================================
+    # STEP 10: Set UAC to Strictest Level
+    # ========================================
+    Print-Header "STEP 10: CONFIGURE UAC TO STRICTEST LEVEL"
+    
+    Print-Info "Setting User Account Control (UAC) to maximum security..."
+    
+    if (Confirm-Action "Set UAC to strictest level (Always Notify)?") {
+        try {
+            # Set UAC to highest level (Always notify)
+            $uacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            
+            # ConsentPromptBehaviorAdmin: 2 = Always notify
+            Set-ItemProperty -Path $uacPath -Name "ConsentPromptBehaviorAdmin" -Value 2 -Type DWord -ErrorAction Stop
+            
+            # PromptOnSecureDesktop: 1 = Prompt on secure desktop
+            Set-ItemProperty -Path $uacPath -Name "PromptOnSecureDesktop" -Value 1 -Type DWord -ErrorAction Stop
+            
+            # EnableLUA: 1 = Enable UAC
+            Set-ItemProperty -Path $uacPath -Name "EnableLUA" -Value 1 -Type DWord -ErrorAction Stop
+            
+            # ConsentPromptBehaviorUser: 3 = Prompt for credentials on the secure desktop
+            Set-ItemProperty -Path $uacPath -Name "ConsentPromptBehaviorUser" -Value 3 -Type DWord -ErrorAction Stop
+            
+            Print-Success "UAC set to strictest level (Always Notify)"
+            Print-Warning "A system restart is required for UAC changes to take full effect"
+        }
+        catch {
+            Print-Error "Failed to configure UAC: $_"
+        }
+    } else {
+        Print-Warning "Skipped UAC configuration"
+    }
+    
+    # ========================================
     # Summary
     # ========================================
     Print-Header "USER AUDIT SUMMARY"
@@ -446,19 +505,157 @@ function Invoke-UserAuditing {
 }
 
 #############################################
-# Module 2: Disable Guest Account
+# Module 2: Configure Password Policies
 #############################################
 
-function Disable-GuestAccount {
-    Print-Header "DISABLE GUEST ACCOUNT"
-    Print-Info "Disabling built-in Guest account..."
+function Configure-PasswordPolicy {
+    Print-Header "PASSWORD POLICY CONFIGURATION"
     
-    # TODO: Implement guest account disabling
-    # - Disable Guest account
-    # - Verify Guest account is disabled
-    # - Remove Guest from any groups
+    Print-Info "Configuring Local Security Policy password and account lockout requirements..."
+    Print-Warning "This module uses secedit to configure security policies"
     
-    Print-Info "Guest account module - TO BE IMPLEMENTED"
+    # ========================================
+    # STEP 1: Configure Password Policies
+    # ========================================
+    Print-Header "STEP 1: CONFIGURE PASSWORD POLICIES"
+    
+    # Create temporary security template
+    $tempSecurityTemplate = "C:\CyberPatriot\secpol_config.inf"
+    $tempSecurityDB = "C:\CyberPatriot\secpol_config.sdb"
+    
+    # Export current security policy
+    Print-Info "Exporting current security policy..."
+    secedit /export /cfg $tempSecurityTemplate | Out-Null
+    
+    if (Test-Path $tempSecurityTemplate) {
+        Print-Success "Current security policy exported"
+        
+        # Read current configuration
+        $securityConfig = Get-Content $tempSecurityTemplate
+        
+        # Modify password policies
+        Print-Info "Configuring password policies..."
+        
+        # Maximum password age (90 days)
+        $securityConfig = $securityConfig -replace 'MaximumPasswordAge\s*=\s*\d+', 'MaximumPasswordAge = 90'
+        
+        # Minimum password age (7 days)
+        $securityConfig = $securityConfig -replace 'MinimumPasswordAge\s*=\s*\d+', 'MinimumPasswordAge = 7'
+        
+        # Minimum password length (10 characters)
+        $securityConfig = $securityConfig -replace 'MinimumPasswordLength\s*=\s*\d+', 'MinimumPasswordLength = 10'
+        
+        # Password complexity (Enabled)
+        $securityConfig = $securityConfig -replace 'PasswordComplexity\s*=\s*\d+', 'PasswordComplexity = 1'
+        
+        # Password history (24 passwords)
+        $securityConfig = $securityConfig -replace 'PasswordHistorySize\s*=\s*\d+', 'PasswordHistorySize = 24'
+        
+        # Store passwords using reversible encryption (Disabled)
+        $securityConfig = $securityConfig -replace 'ClearTextPassword\s*=\s*\d+', 'ClearTextPassword = 0'
+        
+        Print-Success "Password policies configured in template"
+        
+        # ========================================
+        # STEP 2: Configure Account Lockout Policies
+        # ========================================
+        Print-Header "STEP 2: CONFIGURE ACCOUNT LOCKOUT POLICIES"
+        
+        Print-Info "Configuring account lockout policies..."
+        
+        # Account lockout threshold (10 invalid attempts)
+        $securityConfig = $securityConfig -replace 'LockoutBadCount\s*=\s*\d+', 'LockoutBadCount = 10'
+        
+        # Account lockout duration (30 minutes)
+        $securityConfig = $securityConfig -replace 'LockoutDuration\s*=\s*-?\d+', 'LockoutDuration = 30'
+        
+        # Reset account lockout counter after (30 minutes)
+        $securityConfig = $securityConfig -replace 'ResetLockoutCount\s*=\s*\d+', 'ResetLockoutCount = 30'
+        
+        Print-Success "Account lockout policies configured in template"
+        
+        # ========================================
+        # STEP 3: Configure Security Options
+        # ========================================
+        Print-Header "STEP 3: CONFIGURE SECURITY OPTIONS"
+        
+        Print-Info "Configuring security options..."
+        
+        # Limit local use of blank passwords to console only (Enabled)
+        # This is configured via registry as secedit doesn't handle this well
+        
+        # Save modified configuration
+        $securityConfig | Set-Content $tempSecurityTemplate
+        
+        # Apply the security configuration
+        Print-Info "Applying security configuration..."
+        if (Confirm-Action "Apply password and lockout policies to system?") {
+            try {
+                $result = secedit /configure /db $tempSecurityDB /cfg $tempSecurityTemplate /areas SECURITYPOLICY 2>&1
+                
+                if ($LASTEXITCODE -eq 0) {
+                    Print-Success "Security policies applied successfully"
+                } else {
+                    Print-Error "Failed to apply security policies (Exit code: $LASTEXITCODE)"
+                    Print-Info "Result: $result"
+                }
+            }
+            catch {
+                Print-Error "Error applying security policies: $_"
+            }
+        } else {
+            Print-Warning "Skipped applying security policies"
+        }
+        
+        # Configure "Limit local use of blank passwords" via registry
+        Print-Info "Configuring blank password policy..."
+        if (Confirm-Action "Enable 'Limit local use of blank passwords to console only'?") {
+            try {
+                $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+                Set-ItemProperty -Path $regPath -Name "LimitBlankPasswordUse" -Value 1 -Type DWord -ErrorAction Stop
+                Print-Success "Blank password policy enabled"
+            }
+            catch {
+                Print-Error "Failed to set blank password policy: $_"
+            }
+        }
+        
+        # Clean up temporary files
+        if (Test-Path $tempSecurityTemplate) { Remove-Item $tempSecurityTemplate -Force }
+        if (Test-Path $tempSecurityDB) { Remove-Item $tempSecurityDB -Force }
+        
+    } else {
+        Print-Error "Failed to export current security policy"
+    }
+    
+    # ========================================
+    # Summary
+    # ========================================
+    Print-Header "PASSWORD POLICY SUMMARY"
+    
+    Write-Host "`nConfigured Policies:" -ForegroundColor Cyan
+    Write-Host "  Password Policies:" -ForegroundColor Yellow
+    Write-Host "    - Maximum password age: 90 days" -ForegroundColor White
+    Write-Host "    - Minimum password age: 7 days" -ForegroundColor White
+    Write-Host "    - Minimum password length: 10 characters" -ForegroundColor White
+    Write-Host "    - Password complexity: Enabled" -ForegroundColor White
+    Write-Host "    - Password history: 24 passwords" -ForegroundColor White
+    Write-Host "    - Store passwords using reversible encryption: Disabled" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Account Lockout Policies:" -ForegroundColor Yellow
+    Write-Host "    - Account lockout threshold: 10 invalid attempts" -ForegroundColor White
+    Write-Host "    - Account lockout duration: 30 minutes" -ForegroundColor White
+    Write-Host "    - Reset account lockout counter: 30 minutes" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Security Options:" -ForegroundColor Yellow
+    Write-Host "    - Limit blank passwords to console only: Enabled" -ForegroundColor White
+    
+    Print-Info "`nYou can verify these settings by opening Local Security Policy (secpol.msc)"
+    Print-Info "Navigate to: Security Settings > Account Policies > Password Policy"
+    Print-Info "Navigate to: Security Settings > Account Policies > Account Lockout Policy"
+    Print-Info "Navigate to: Security Settings > Local Policies > Security Options"
+    
+    Print-Header "PASSWORD POLICY CONFIGURATION COMPLETE"
     Press-Enter
 }
 
@@ -482,22 +679,19 @@ function Configure-Firewall {
 }
 
 #############################################
-# Module 4: Configure Password Policies
+# Module 4: Disable Guest Account
 #############################################
 
-function Configure-PasswordPolicy {
-    Print-Header "PASSWORD POLICY CONFIGURATION"
-    Print-Info "Configuring Local Security Policy password requirements..."
+function Disable-GuestAccount {
+    Print-Header "DISABLE GUEST ACCOUNT"
+    Print-Info "Disabling built-in Guest account..."
     
-    # TODO: Implement password policy configuration
-    # - Set minimum password length (10-14 characters)
-    # - Set password complexity requirements
-    # - Set maximum password age (90 days)
-    # - Set minimum password age (7 days)
-    # - Set password history (5-24 passwords)
-    # - Configure account lockout policy
+    # TODO: Implement guest account disabling
+    # - Disable Guest account
+    # - Verify Guest account is disabled
+    # - Remove Guest from any groups
     
-    Print-Info "Password policy module - TO BE IMPLEMENTED"
+    Print-Info "Guest account module - TO BE IMPLEMENTED"
     Press-Enter
 }
 
@@ -680,9 +874,9 @@ function Invoke-LocalSecurityPolicyHardening {
 function Show-Menu {
     Clear-Host
     Write-Host " 1) User Account Auditing" -ForegroundColor Green
-    Write-Host " 2) Disable Guest Account" -ForegroundColor Green
+    Write-Host " 2) Configure Password Policies" -ForegroundColor Green
     Write-Host " 3) Configure Windows Firewall" -ForegroundColor Green
-    Write-Host " 4) Configure Password Policies" -ForegroundColor Green
+    Write-Host " 4) Disable Guest Account" -ForegroundColor Green
     Write-Host " 5) Audit Services" -ForegroundColor Green
     Write-Host " 6) Audit File Permissions" -ForegroundColor Green
     Write-Host " 7) Windows Update" -ForegroundColor Green
@@ -711,9 +905,9 @@ function Main {
         
         switch ($choice) {
             "1"  { Invoke-UserAuditing }
-            "2"  { Disable-GuestAccount }
+            "2"  { Configure-PasswordPolicy }
             "3"  { Configure-Firewall }
-            "4"  { Configure-PasswordPolicy }
+            "4"  { Disable-GuestAccount }
             "5"  { Invoke-ServiceAudit }
             "6"  { Invoke-FilePermissionsAudit }
             "7"  { Invoke-WindowsUpdate }
