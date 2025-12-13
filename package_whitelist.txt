@@ -964,7 +964,6 @@ zstd
 mecab-ipadic
 mecab-ipadic-utf8
 mecab-utils
-postfix
 rhythmbox
 xapp-appimage-thumbnailer
 dracut-install
