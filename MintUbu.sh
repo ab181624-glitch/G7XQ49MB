@@ -2762,15 +2762,17 @@ remove_prohibited_software() {
         "jpg" "jpeg" "png" "gif" "bmp" "tiff" "webp"  # Images
         "iso" "img" "dmg"                              # Disk images
         "exe" "msi" "apk"                              # Executables (suspicious)
-        "txt"                                          #leftover messages / files
+        "txt"                                          # leftover messages / files
     )
     
-    # Directories to search (user home directories)
-    echo -e "\n${BOLD}Scanning for media files in user directories...${NC}"
-    print_warning "This will search /home for potentially unauthorized media files"
+    # ========================================
+    # Part 1: Quick Synchronous Scan of /home
+    # ========================================
+    echo -e "\n${BOLD}Step 1: Quick Scan of /home${NC}"
+    print_info "Scanning user home directories for media files"
     
-    if ! confirm_action "Start scanning for media files?"; then
-        print_info "Media file scan cancelled"
+    if ! confirm_action "Start quick /home scan?"; then
+        print_info "Quick scan cancelled"
         press_enter
         return
     fi
@@ -2778,8 +2780,8 @@ remove_prohibited_software() {
     # Create array to store found files
     declare -a found_files=()
     
-    # Search for each extension
-    echo -e "\n${CYAN}Searching for media files...${NC}"
+    # Search for each extension in /home only
+    echo -e "\n${CYAN}Searching /home for media files...${NC}"
     for ext in "${media_extensions[@]}"; do
         echo -e "${BLUE}[i]${NC} Scanning for .$ext files..."
         
@@ -2792,84 +2794,336 @@ remove_prohibited_software() {
         done < <(find /home -type f -iname "*.${ext}" ! -path "*/.*/*" -print0 2>/dev/null)
     done
     
-    # Display results
-    echo -e "\n${BOLD}Scan Results:${NC}"
+    # Display quick scan results
+    echo -e "\n${BOLD}Quick Scan Results:${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
     if [[ ${#found_files[@]} -eq 0 ]]; then
-        print_success "No media files found!"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        press_enter
-        return
+        print_success "No media files found in /home!"
+    else
+        print_warning "Found ${#found_files[@]} media file(s) in /home"
+        
+        # Ask if user wants to review files
+        if confirm_action "Review and delete files from /home?"; then
+            # Review each file
+            echo -e "\n${BOLD}Reviewing media files...${NC}"
+            echo -e "${YELLOW}You will be prompted for each file${NC}\n"
+            
+            for file in "${found_files[@]}"; do
+                # Get file info
+                local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
+                local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
+                local file_modified=$(stat -c "%y" "$file" 2>/dev/null | cut -d' ' -f1)
+                
+                # Display file info
+                echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                echo -e "${BOLD}File:${NC} $file"
+                echo -e "${BOLD}Size:${NC} $file_size"
+                echo -e "${BOLD}Owner:${NC} $file_owner"
+                echo -e "${BOLD}Modified:${NC} $file_modified"
+                
+                # Show file type (if available)
+                if command -v file &>/dev/null; then
+                    local file_type=$(file -b "$file" 2>/dev/null)
+                    echo -e "${BOLD}Type:${NC} $file_type"
+                fi
+                
+                # Prompt to delete
+                if confirm_action "Delete this file?"; then
+                    if rm -f "$file" 2>/dev/null; then
+                        print_success "Deleted: $file"
+                        ((files_removed++))
+                        changes_made=true
+                        log_message "REMOVED MEDIA FILE: $file (size: $file_size, owner: $file_owner)"
+                    else
+                        print_error "Failed to delete: $file (check permissions)"
+                    fi
+                else
+                    print_info "Kept: $file"
+                    ((files_kept++))
+                fi
+                
+                echo ""
+            done
+            
+            # Quick scan summary
+            echo -e "${BOLD}Quick Scan Summary:${NC}"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "${BLUE}[i]${NC} Total files found in /home: ${#found_files[@]}"
+            echo -e "${GREEN}✓${NC} Files removed: $files_removed"
+            echo -e "${YELLOW}!${NC} Files kept: $files_kept"
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            
+            if [[ "$changes_made" == true ]]; then
+                print_success "Quick scan cleanup completed"
+            fi
+        fi
     fi
     
-    print_warning "Found ${#found_files[@]} media file(s)"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    # Ask if user wants to review files
-    if ! confirm_action "Review and delete media files?"; then
-        print_info "Media file removal cancelled"
+    # ========================================
+    # Part 2: Full System Scan (Background)
+    # ========================================
+    echo -e "\n${BOLD}Step 2: Full System Scan (Optional)${NC}"
+    print_info "Scan the ENTIRE system for prohibited files (runs in background)"
+    print_warning "This will scan /, /opt, /srv, /var, /tmp, etc. - may take a long time"
+    echo ""
+    
+    if ! confirm_action "Launch comprehensive full system scan in background?"; then
+        print_info "Full system scan skipped"
         press_enter
         return
     fi
     
-    # Review each file
-    echo -e "\n${BOLD}Reviewing media files...${NC}"
-    echo -e "${YELLOW}You will be prompted for each file${NC}\n"
+    # Create temporary scanner script for FULL SYSTEM scan
+    local scanner_script="/tmp/media_file_scanner_full_$$.sh"
     
-    for file in "${found_files[@]}"; do
-        # Get file info
-        local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
-        local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
-        local file_modified=$(stat -c "%y" "$file" 2>/dev/null | cut -d' ' -f1)
+    cat > "$scanner_script" << 'SCANNER_EOF'
+#!/bin/bash
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+LOG_FILE="/var/log/media_scan_full_$(date +%Y%m%d_%H%M%S).log"
+
+echo -e "${CYAN}${BOLD}"
+echo "============================================================"
+echo "      FULL SYSTEM PROHIBITED FILES SCANNER"
+echo "      Running in background - Terminal stays open"
+echo "============================================================"
+echo -e "${NC}"
+echo ""
+echo -e "${YELLOW}Log file: $LOG_FILE${NC}"
+echo -e "${RED}WARNING: Scanning entire system - this may take 10-30+ minutes!${NC}"
+echo ""
+
+# Define media file extensions
+media_extensions=(
+    "mp3" "mp4" "avi" "mov" "wmv" "flv" "mkv"
+    "wav" "flac" "aac" "ogg" "m4a"
+    "jpg" "jpeg" "png" "gif" "bmp" "tiff" "webp"
+    "iso" "img" "dmg"
+    "exe" "msi" "apk"
+    "txt"
+)
+
+# Directories to scan (entire system except sensitive areas)
+scan_dirs=(
+    "/home"
+    "/root"
+    "/opt"
+    "/srv"
+    "/var/www"
+    "/var/tmp"
+    "/tmp"
+    "/usr/local"
+)
+
+# Create array to store found files
+declare -a found_files=()
+
+echo -e "${CYAN}Scanning entire system for prohibited files...${NC}"
+echo -e "${YELLOW}This comprehensive scan checks multiple directories${NC}"
+echo ""
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting full system scan" >> "$LOG_FILE"
+
+# Search for each extension in all directories
+for scan_dir in "${scan_dirs[@]}"; do
+    if [[ ! -d "$scan_dir" ]]; then
+        continue
+    fi
+    
+    echo -e "${BOLD}Scanning: $scan_dir${NC}"
+    
+    for ext in "${media_extensions[@]}"; do
+        echo -e "${BLUE}  [i]${NC} Looking for .$ext files in $scan_dir..."
         
-        # Display file info
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${BOLD}File:${NC} $file"
-        echo -e "${BOLD}Size:${NC} $file_size"
-        echo -e "${BOLD}Owner:${NC} $file_owner"
-        echo -e "${BOLD}Modified:${NC} $file_modified"
-        
-        # Show file type (if available)
-        if command -v file &>/dev/null; then
-            local file_type=$(file -b "$file" 2>/dev/null)
-            echo -e "${BOLD}Type:${NC} $file_type"
-        fi
-        
-        # Prompt to delete
-        if confirm_action "Delete this file?"; then
-            if rm -f "$file" 2>/dev/null; then
-                print_success "Deleted: $file"
-                ((files_removed++))
-                changes_made=true
-                
-                # Log to audit log
-                log_message "REMOVED MEDIA FILE: $file (size: $file_size, owner: $file_owner)"
-            else
-                print_error "Failed to delete: $file (check permissions)"
+        # Find files with this extension
+        while IFS= read -r -d '' file; do
+            # Skip common false positives
+            if [[ "$file" =~ /(\.cache|\.local|\.config|node_modules|\.git)/ ]]; then
+                continue
             fi
-        else
-            print_info "Kept: $file"
-            ((files_kept++))
-        fi
+            found_files+=("$file")
+        done < <(find "$scan_dir" -type f -iname "*.${ext}" -print0 2>/dev/null)
+    done
+done
+
+echo ""
+echo -e "${BOLD}Full System Scan Complete!${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+if [[ ${#found_files[@]} -eq 0 ]]; then
+    echo -e "${GREEN}✓${NC} No suspicious files found across the system!"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "Results logged to: $LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Full scan complete - No files found" >> "$LOG_FILE"
+    echo ""
+    echo -e "${CYAN}Press Enter to close this window...${NC}"
+    read
+    exit 0
+fi
+
+echo -e "${YELLOW}⚠${NC}  Found ${#found_files[@]} suspicious file(s) across the system"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+# Log all found files
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Full scan found ${#found_files[@]} suspicious files:" >> "$LOG_FILE"
+for file in "${found_files[@]}"; do
+    echo "  - $file" >> "$LOG_FILE"
+done
+
+echo -e "${YELLOW}Files found:${NC}"
+for file in "${found_files[@]}"; do
+    local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
+    local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
+    echo -e "  ${RED}!${NC} $file (${file_size}, owner: ${file_owner})"
+done
+
+echo ""
+echo -e "${BOLD}Review Options:${NC}"
+echo -e "  1) Open interactive file review (prompts for each file)"
+echo -e "  2) Delete ALL found files (NO CONFIRMATION)"
+echo -e "  3) Save list to file and exit"
+echo -e "  4) Do nothing and exit"
+echo ""
+echo -n "Select option (1-4): "
+read option
+
+case "$option" in
+    1)
+        echo ""
+        echo -e "${YELLOW}Reviewing each file - you will be prompted${NC}"
+        echo ""
+        files_removed=0
+        files_kept=0
+        
+        for file in "${found_files[@]}"; do
+            local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
+            local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
+            local file_modified=$(stat -c "%y" "$file" 2>/dev/null | cut -d' ' -f1)
+            
+            echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "${BOLD}File:${NC} $file"
+            echo -e "${BOLD}Size:${NC} $file_size"
+            echo -e "${BOLD}Owner:${NC} $file_owner"
+            echo -e "${BOLD}Modified:${NC} $file_modified"
+            echo ""
+            
+            echo -n "Delete this file? (y/n): "
+            read response
+            
+            if [[ "$response" =~ ^[Yy]$ ]]; then
+                rm -f "$file"
+                if [[ $? -eq 0 ]]; then
+                    echo -e "${GREEN}✓${NC} Removed: $file"
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] REMOVED: $file" >> "$LOG_FILE"
+                    ((files_removed++))
+                else
+                    echo -e "${RED}✗${NC} Failed to remove: $file"
+                fi
+            else
+                echo -e "${YELLOW}!${NC} Kept: $file"
+                ((files_kept++))
+            fi
+            echo ""
+        done
         
         echo ""
-    done
+        echo -e "${BOLD}Summary:${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${GREEN}✓${NC} Files removed: $files_removed"
+        echo -e "${YELLOW}!${NC} Files kept: $files_kept"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        ;;
+    2)
+        echo ""
+        echo -e "${RED}${BOLD}⚠ WARNING: Deleting ALL files without confirmation!${NC}"
+        files_removed=0
+        
+        for file in "${found_files[@]}"; do
+            rm -f "$file"
+            if [[ $? -eq 0 ]]; then
+                echo -e "${GREEN}✓${NC} Removed: $file"
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] REMOVED: $file" >> "$LOG_FILE"
+                ((files_removed++))
+            fi
+        done
+        
+        echo ""
+        echo -e "${GREEN}✓${NC} Deleted $files_removed file(s)"
+        ;;
+    3)
+        local output_file="/tmp/media_files_found_full_$(date +%Y%m%d_%H%M%S).txt"
+        printf "%s\n" "${found_files[@]}" > "$output_file"
+        echo ""
+        echo -e "${GREEN}✓${NC} File list saved to: $output_file"
+        ;;
+    4)
+        echo ""
+        echo -e "${BLUE}[i]${NC} No action taken"
+        ;;
+    *)
+        echo ""
+        echo -e "${RED}✗${NC} Invalid option - no action taken"
+        ;;
+esac
+
+echo ""
+echo "Complete log saved to: $LOG_FILE"
+echo ""
+echo -e "${CYAN}Press Enter to close this window...${NC}"
+read
+SCANNER_EOF
+
+    chmod +x "$scanner_script"
     
-    # Final summary
-    echo -e "${BOLD}Media File Removal Summary:${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BLUE}[i]${NC} Total files found: ${#found_files[@]}"
-    echo -e "${GREEN}✓${NC} Files removed: $files_removed"
-    echo -e "${YELLOW}!${NC} Files kept: $files_kept"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    # Launch full system scanner in background
+    echo -e "\n${BOLD}Launching full system scanner in separate terminal...${NC}"
+    print_info "The scanner will scan the entire system in a new terminal window"
+    print_info "You can continue using this script while the scan proceeds"
+    echo ""
     
-    if [[ "$changes_made" == true ]]; then
-        print_success "Media file cleanup completed"
-        print_info "Removed files are permanently deleted"
-    else
-        print_info "No files were removed"
+    if ! confirm_action "Launch background media file scanner?"; then
+        print_info "Media file scan cancelled"
+        rm -f "$scanner_script"
+        press_enter
+        return
     fi
+    
+    # Detect which terminal emulator to use
+    if command -v gnome-terminal &>/dev/null; then
+        gnome-terminal -- bash -c "sudo $scanner_script" &
+        print_success "Full system scanner launched in GNOME Terminal"
+    elif command -v xterm &>/dev/null; then
+        xterm -hold -e "sudo $scanner_script" &
+        print_success "Full system scanner launched in xterm"
+    elif command -v konsole &>/dev/null; then
+        konsole -e "sudo $scanner_script" &
+        print_success "Full system scanner launched in Konsole"
+    elif command -v xfce4-terminal &>/dev/null; then
+        xfce4-terminal --hold -e "sudo $scanner_script" &
+        print_success "Full system scanner launched in XFCE Terminal"
+    else
+        print_warning "No terminal emulator found - running in background without window"
+        print_info "Check /var/log/media_scan_full_*.log for results"
+        nohup sudo "$scanner_script" > /dev/null 2>&1 &
+    fi
+    
+    local scanner_pid=$!
+    print_info "Scanner PID: $scanner_pid"
+    print_info "Full system scan logs will be saved to: /var/log/media_scan_full_*.log"
+    echo ""
+    print_success "Full system scanner started in background - you can continue with other tasks"
     
     # Part 4.5: Backdoor Detection
     echo -e "\n${BOLD}Step 3.5: Backdoor Detection${NC}"
