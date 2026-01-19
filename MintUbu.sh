@@ -4796,6 +4796,543 @@ manual_pam_guide() {
 }
 
 #############################################
+# Task 14: OS Settings Configuration
+#############################################
+
+configure_os_settings() {
+    print_header "OPERATING SYSTEM SETTINGS CONFIGURATION"
+    print_info "This module configures system-level security settings"
+    echo ""
+    
+    local changes_made=false
+    
+    # 1. Screen Lock and Screensaver Settings
+    echo -e "\n${BOLD}1. Screen Lock & Screensaver Configuration${NC}"
+    print_info "Configuring automatic screen lock on idle"
+    
+    if command -v gsettings &>/dev/null; then
+        if confirm_action "Configure automatic screen lock?"; then
+            # Check if we're in GNOME/Cinnamon environment
+            if [[ -n "$XDG_CURRENT_DESKTOP" ]]; then
+                case "$XDG_CURRENT_DESKTOP" in
+                    *GNOME*|*Cinnamon*)
+                        # Lock screen after 10 minutes of inactivity
+                        gsettings set org.cinnamon.desktop.screensaver lock-enabled true 2>/dev/null || \
+                        gsettings set org.gnome.desktop.screensaver lock-enabled true 2>/dev/null
+                        
+                        # Set idle delay to 10 minutes (600 seconds)
+                        gsettings set org.cinnamon.desktop.screensaver idle-activation-enabled true 2>/dev/null || \
+                        gsettings set org.gnome.desktop.screensaver idle-activation-enabled true 2>/dev/null
+                        
+                        gsettings set org.cinnamon.desktop.session idle-delay 600 2>/dev/null || \
+                        gsettings set org.gnome.desktop.session idle-delay 600 2>/dev/null
+                        
+                        # Lock immediately when screensaver activates
+                        gsettings set org.cinnamon.desktop.screensaver lock-delay 0 2>/dev/null || \
+                        gsettings set org.gnome.desktop.screensaver lock-delay 0 2>/dev/null
+                        
+                        print_success "Configured automatic screen lock after 10 minutes idle"
+                        print_info "  - Screen lock enabled"
+                        print_info "  - Idle timeout: 10 minutes"
+                        print_info "  - Lock delay: immediate"
+                        changes_made=true
+                    ;;
+                    *)
+                        print_warning "Desktop environment not GNOME/Cinnamon - manual configuration required"
+                        print_info "Configure screen lock in your desktop's settings"
+                    ;;
+                esac
+            else
+                print_warning "No desktop environment detected (running in SSH?)"
+                print_info "Screen lock settings apply per-user in GUI sessions"
+            fi
+        fi
+    else
+        print_warning "gsettings not available - cannot configure screen lock"
+    fi
+    
+    # 2. Bluetooth Security
+    echo -e "\n${BOLD}2. Bluetooth Configuration${NC}"
+    print_info "Checking Bluetooth status"
+    
+    if systemctl list-unit-files bluetooth.service &>/dev/null; then
+        local bt_status=$(systemctl is-enabled bluetooth.service 2>/dev/null || echo "not-found")
+        print_info "Bluetooth service status: $bt_status"
+        
+        if [[ "$bt_status" == "enabled" ]]; then
+            if confirm_action "Disable Bluetooth service? (Recommended unless needed)"; then
+                systemctl stop bluetooth.service
+                systemctl disable bluetooth.service
+                print_success "Disabled Bluetooth service"
+                changes_made=true
+            fi
+        else
+            print_success "Bluetooth is already disabled or not installed"
+        fi
+    else
+        print_info "Bluetooth service not found"
+    fi
+    
+    # 3. Automatic Updates Configuration
+    echo -e "\n${BOLD}3. Automatic Updates Configuration${NC}"
+    print_info "Configuring unattended-upgrades for security updates"
+    
+    if ! dpkg -l | grep -q unattended-upgrades; then
+        if confirm_action "Install unattended-upgrades for automatic security updates?"; then
+            apt-get install -y unattended-upgrades apt-listchanges
+            if [[ $? -eq 0 ]]; then
+                print_success "Installed unattended-upgrades"
+                changes_made=true
+            else
+                print_error "Failed to install unattended-upgrades"
+            fi
+        fi
+    fi
+    
+    if dpkg -l | grep -q unattended-upgrades; then
+        if confirm_action "Configure automatic security updates?"; then
+            local uu_config="/etc/apt/apt.conf.d/50unattended-upgrades"
+            
+            if [[ -f "$uu_config" ]]; then
+                cp "$uu_config" "${uu_config}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                # Enable automatic security updates
+                cat > "$uu_config" << 'EOF'
+// Automatically upgrade packages from these origins
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+
+// List of packages to not update automatically
+Unattended-Upgrade::Package-Blacklist {
+};
+
+// Automatically remove unused dependencies
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+// Automatically reboot if needed
+Unattended-Upgrade::Automatic-Reboot "false";
+
+// Send email on errors
+Unattended-Upgrade::Mail "root";
+Unattended-Upgrade::MailReport "on-change";
+
+// Remove unused kernel packages
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+EOF
+                
+                # Enable automatic updates
+                cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+                
+                print_success "Configured automatic security updates"
+                print_info "  - Security updates: enabled"
+                print_info "  - Daily update checks"
+                print_info "  - Automatic reboot: disabled (manual reboot required)"
+                changes_made=true
+            fi
+        fi
+    fi
+    
+    # 4. Firewall Status Check
+    echo -e "\n${BOLD}4. Firewall Status${NC}"
+    print_info "Checking UFW firewall status"
+    
+    if command -v ufw &>/dev/null; then
+        local ufw_status=$(ufw status | head -1)
+        print_info "UFW Status: $ufw_status"
+        
+        if echo "$ufw_status" | grep -q "inactive"; then
+            print_warning "Firewall is INACTIVE!"
+            print_info "Use menu option 3 to configure the firewall"
+        else
+            print_success "Firewall is active"
+            ufw status numbered
+        fi
+    else
+        print_warning "UFW not installed"
+        if confirm_action "Install UFW firewall?"; then
+            apt-get install -y ufw
+            if [[ $? -eq 0 ]]; then
+                print_success "Installed UFW"
+                print_info "Use menu option 3 to configure the firewall"
+                changes_made=true
+            fi
+        fi
+    fi
+    
+    # 5. System Logging Configuration
+    echo -e "\n${BOLD}5. System Logging Configuration${NC}"
+    print_info "Verifying system logging services"
+    
+    # Check rsyslog
+    if systemctl list-unit-files rsyslog.service &>/dev/null; then
+        local rsyslog_status=$(systemctl is-active rsyslog.service 2>/dev/null)
+        print_info "rsyslog status: $rsyslog_status"
+        
+        if [[ "$rsyslog_status" != "active" ]]; then
+            if confirm_action "Enable rsyslog for system logging?"; then
+                systemctl enable rsyslog.service
+                systemctl start rsyslog.service
+                print_success "Enabled rsyslog"
+                changes_made=true
+            fi
+        else
+            print_success "rsyslog is active"
+        fi
+    fi
+    
+    # Check auditd
+    if systemctl list-unit-files auditd.service &>/dev/null; then
+        local auditd_status=$(systemctl is-active auditd.service 2>/dev/null)
+        print_info "auditd status: $auditd_status"
+        
+        if [[ "$auditd_status" != "active" ]]; then
+            print_warning "auditd is not active - advanced security auditing unavailable"
+            if confirm_action "Install and enable auditd for security auditing?"; then
+                apt-get install -y auditd audispd-plugins
+                systemctl enable auditd.service
+                systemctl start auditd.service
+                print_success "Enabled auditd"
+                changes_made=true
+            fi
+        else
+            print_success "auditd is active"
+        fi
+    else
+        if confirm_action "Install auditd for security auditing?"; then
+            apt-get install -y auditd audispd-plugins
+            systemctl enable auditd.service
+            systemctl start auditd.service
+            print_success "Installed and enabled auditd"
+            changes_made=true
+        fi
+    fi
+    
+    # 6. Kernel Parameters (sysctl) Hardening
+    echo -e "\n${BOLD}6. Kernel Parameter Hardening${NC}"
+    print_info "Configuring kernel security parameters via sysctl"
+    
+    if confirm_action "Apply kernel security hardening?"; then
+        local sysctl_conf="/etc/sysctl.d/99-cyberpatriot-hardening.conf"
+        
+        cat > "$sysctl_conf" << 'EOF'
+# CyberPatriot Kernel Hardening Parameters
+
+# IP Forwarding (disable unless this is a router)
+net.ipv4.ip_forward = 0
+net.ipv6.conf.all.forwarding = 0
+
+# Disable source packet routing
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+
+# Disable ICMP redirect acceptance
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+
+# Enable IP spoofing protection (reverse path filtering)
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Log suspicious packets (Martians)
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# Ignore ICMP ping requests
+net.ipv4.icmp_echo_ignore_all = 0
+net.ipv6.icmp.echo_ignore_all = 0
+
+# Ignore broadcast pings
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+# Protect against tcp time-wait assassination hazards
+net.ipv4.tcp_rfc1337 = 1
+
+# Enable SYN cookies (SYN flood protection)
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_syn_retries = 2
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_max_syn_backlog = 4096
+
+# Disable IPv6 (if not needed)
+# net.ipv6.conf.all.disable_ipv6 = 1
+# net.ipv6.conf.default.disable_ipv6 = 1
+
+# Increase system file descriptor limits
+fs.file-max = 65535
+
+# Restrict access to kernel logs
+kernel.dmesg_restrict = 1
+
+# Restrict access to kernel pointers in /proc
+kernel.kptr_restrict = 2
+
+# Enable ASLR (Address Space Layout Randomization)
+kernel.randomize_va_space = 2
+
+# Restrict core dumps
+fs.suid_dumpable = 0
+kernel.core_uses_pid = 1
+
+# Protect hard and symbolic links
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+EOF
+        
+        # Apply sysctl settings
+        sysctl -p "$sysctl_conf" >/dev/null 2>&1
+        
+        if [[ $? -eq 0 ]]; then
+            print_success "Applied kernel hardening parameters"
+            print_info "  - IP forwarding: disabled"
+            print_info "  - Source routing: disabled"
+            print_info "  - ICMP redirects: disabled"
+            print_info "  - Reverse path filtering: enabled"
+            print_info "  - SYN cookies: enabled"
+            print_info "  - Kernel pointer restrictions: enabled"
+            print_info "  - ASLR: enabled"
+            print_info "  - Core dump restrictions: enabled"
+            changes_made=true
+        else
+            print_error "Failed to apply some sysctl parameters"
+        fi
+    fi
+    
+    # 7. Core Dump Restrictions
+    echo -e "\n${BOLD}7. Core Dump Security${NC}"
+    print_info "Restricting core dump generation"
+    
+    if confirm_action "Disable core dumps for all users?"; then
+        # Disable core dumps via limits.conf
+        local limits_conf="/etc/security/limits.conf"
+        
+        if ! grep -q "^*.*hard.*core.*0" "$limits_conf"; then
+            echo "* hard core 0" >> "$limits_conf"
+            print_success "Added core dump restriction to limits.conf"
+            changes_made=true
+        else
+            print_info "Core dump restriction already present in limits.conf"
+        fi
+        
+        # Disable core dumps for setuid programs (already in sysctl above)
+        print_success "Core dumps disabled for setuid programs"
+        
+        # Systemd coredump configuration
+        if [[ -d /etc/systemd ]]; then
+            mkdir -p /etc/systemd/coredump.conf.d
+            cat > /etc/systemd/coredump.conf.d/disable.conf << 'EOF'
+[Coredump]
+Storage=none
+ProcessSizeMax=0
+EOF
+            systemctl daemon-reload 2>/dev/null
+            print_success "Disabled systemd coredump storage"
+            changes_made=true
+        fi
+    fi
+    
+    # 8. AppArmor/SELinux Status
+    echo -e "\n${BOLD}8. Mandatory Access Control (AppArmor/SELinux)${NC}"
+    print_info "Checking MAC system status"
+    
+    # Check AppArmor (common on Ubuntu/Mint)
+    if command -v aa-status &>/dev/null; then
+        print_info "AppArmor detected"
+        
+        local apparmor_enabled=$(aa-status --enabled 2>/dev/null && echo "yes" || echo "no")
+        if [[ "$apparmor_enabled" == "yes" ]]; then
+            print_success "AppArmor is enabled"
+            
+            if confirm_action "View AppArmor status?"; then
+                aa-status
+                press_enter
+            fi
+            
+            # Check for profiles in complain mode
+            local complain_count=$(aa-status 2>/dev/null | grep "profiles are in complain mode" | grep -oP '\d+' | head -1)
+            if [[ -n "$complain_count" && "$complain_count" -gt 0 ]]; then
+                print_warning "$complain_count AppArmor profiles in complain mode (should be enforce mode)"
+                
+                if confirm_action "Switch complain mode profiles to enforce mode?"; then
+                    for profile in /etc/apparmor.d/*; do
+                        if [[ -f "$profile" && ! "$profile" =~ \.dpkg|cache|disable|local ]]; then
+                            aa-enforce "$profile" 2>/dev/null
+                        fi
+                    done
+                    print_success "Switched profiles to enforce mode"
+                    changes_made=true
+                fi
+            fi
+        else
+            print_warning "AppArmor is NOT enabled"
+            if confirm_action "Enable AppArmor?"; then
+                systemctl enable apparmor.service
+                systemctl start apparmor.service
+                print_success "Enabled AppArmor"
+                print_warning "Reboot required for full AppArmor activation"
+                changes_made=true
+            fi
+        fi
+    # Check SELinux (less common on Ubuntu/Mint)
+    elif command -v getenforce &>/dev/null; then
+        print_info "SELinux detected"
+        local selinux_status=$(getenforce 2>/dev/null)
+        print_info "SELinux status: $selinux_status"
+        
+        if [[ "$selinux_status" == "Disabled" ]]; then
+            print_warning "SELinux is disabled"
+            print_info "Enabling SELinux requires /etc/selinux/config edit and reboot"
+        elif [[ "$selinux_status" == "Permissive" ]]; then
+            print_warning "SELinux is in permissive mode (should be enforcing)"
+            if confirm_action "Set SELinux to enforcing mode?"; then
+                setenforce 1
+                print_success "Set SELinux to enforcing mode for current session"
+                print_info "Edit /etc/selinux/config to make permanent"
+                changes_made=true
+            fi
+        else
+            print_success "SELinux is in enforcing mode"
+        fi
+    else
+        print_warning "No MAC system (AppArmor/SELinux) detected"
+        print_info "Consider installing AppArmor: apt-get install apparmor apparmor-utils"
+    fi
+    
+    # 9. Boot Security (GRUB)
+    echo -e "\n${BOLD}9. Boot Configuration Security${NC}"
+    print_info "Checking GRUB bootloader security"
+    
+    local grub_cfg="/etc/default/grub"
+    if [[ -f "$grub_cfg" ]]; then
+        # Check if GRUB password is set
+        if ! grep -q "^GRUB_PASSWORD" /boot/grub/grub.cfg 2>/dev/null; then
+            print_warning "GRUB bootloader is not password protected"
+            
+            if confirm_action "Set GRUB password? (Prevents unauthorized boot parameter changes)"; then
+                print_info "Generating GRUB password hash..."
+                echo -e "${YELLOW}Enter GRUB password:${NC}"
+                grub-mkpasswd-pbkdf2
+                echo ""
+                print_warning "Copy the hash that starts with 'grub.pbkdf2.sha512...'"
+                print_info "Add these lines to /etc/grub.d/40_custom:"
+                echo -e "${CYAN}set superusers=\"root\"${NC}"
+                echo -e "${CYAN}password_pbkdf2 root <paste_hash_here>${NC}"
+                echo ""
+                print_info "Then run: sudo update-grub"
+                echo ""
+                
+                if confirm_action "Open /etc/grub.d/40_custom in nano now?"; then
+                    nano /etc/grub.d/40_custom
+                    
+                    if confirm_action "Update GRUB now?"; then
+                        update-grub
+                        print_success "Updated GRUB configuration"
+                        changes_made=true
+                    fi
+                fi
+            fi
+        else
+            print_success "GRUB password protection detected"
+        fi
+        
+        # Kernel hardening parameters in GRUB
+        if confirm_action "Add kernel hardening parameters to GRUB?"; then
+            cp "$grub_cfg" "${grub_cfg}.bak.$(date +%Y%m%d_%H%M%S)"
+            
+            # Add security parameters to GRUB_CMDLINE_LINUX_DEFAULT
+            if grep -q "^GRUB_CMDLINE_LINUX_DEFAULT=" "$grub_cfg"; then
+                # Check if security parameters already present
+                if ! grep "^GRUB_CMDLINE_LINUX_DEFAULT=" "$grub_cfg" | grep -q "apparmor=1"; then
+                    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 apparmor=1 security=apparmor"/' "$grub_cfg"
+                    
+                    update-grub
+                    print_success "Added kernel hardening parameters to GRUB"
+                    print_info "  - AppArmor enforcement at boot"
+                    print_warning "Reboot required for changes to take effect"
+                    changes_made=true
+                fi
+            fi
+        fi
+    else
+        print_warning "GRUB configuration not found at $grub_cfg"
+    fi
+    
+    # 10. Additional execution restrictions
+    echo -e "\n${BOLD}10. Additional Execution Restrictions${NC}"
+    print_info "Restricting execution in temporary directories"
+    
+    if confirm_action "Restrict execution in /tmp, /var/tmp, /dev/shm?"; then
+        local fstab="/etc/fstab"
+        cp "$fstab" "${fstab}.bak.$(date +%Y%m%d_%H%M%S)"
+        
+        local needs_remount=false
+        
+        # /tmp with noexec, nosuid, nodev
+        if ! grep -q "/tmp.*noexec" "$fstab"; then
+            echo "tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,mode=1777 0 0" >> "$fstab"
+            print_success "Added /tmp with noexec to fstab"
+            needs_remount=true
+        fi
+        
+        # /var/tmp with noexec, nosuid, nodev
+        if ! grep -q "/var/tmp.*noexec" "$fstab"; then
+            echo "tmpfs /var/tmp tmpfs defaults,noexec,nosuid,nodev,mode=1777 0 0" >> "$fstab"
+            print_success "Added /var/tmp with noexec to fstab"
+            needs_remount=true
+        fi
+        
+        # /dev/shm with noexec, nosuid, nodev
+        if ! grep -q "/dev/shm.*noexec" "$fstab"; then
+            if grep -q "^tmpfs /dev/shm" "$fstab"; then
+                sed -i 's|^tmpfs /dev/shm tmpfs.*|tmpfs /dev/shm tmpfs defaults,noexec,nosuid,nodev 0 0|' "$fstab"
+            else
+                echo "tmpfs /dev/shm tmpfs defaults,noexec,nosuid,nodev 0 0" >> "$fstab"
+            fi
+            print_success "Added /dev/shm with noexec to fstab"
+            needs_remount=true
+        fi
+        
+        if [[ "$needs_remount" == "true" ]]; then
+            print_warning "Filesystem changes require reboot to take effect"
+            print_info "Or remount manually:"
+            echo -e "  ${CYAN}mount -o remount /tmp${NC}"
+            echo -e "  ${CYAN}mount -o remount /var/tmp${NC}"
+            echo -e "  ${CYAN}mount -o remount /dev/shm${NC}"
+            changes_made=true
+        else
+            print_info "Execution restrictions already configured in fstab"
+        fi
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    if [[ "$changes_made" == "true" ]]; then
+        print_success "OS Settings configuration completed with changes"
+        print_warning "Some changes may require a system reboot to take effect"
+    else
+        print_info "No changes were made"
+    fi
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    
+    press_enter
+}
+
+#############################################
 # Main Menu
 #############################################
 
@@ -4814,6 +5351,7 @@ show_menu() {
     echo -e "${GREEN}11)${NC} Harden FTP Server (vsftpd)"
     echo -e "${GREEN}12)${NC} Enable Security Features"
     echo -e "${RED}13)${NC} Complete Password Complexity & PAM Config ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
+    echo -e "${GREEN}14)${NC} OS Settings (Screen Lock, Bluetooth, Updates, Kernel, Boot)"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -4846,6 +5384,7 @@ main() {
             11) harden_ftp ;;
             12) enable_security_features ;;
             13) complete_password_pam_configuration ;;
+            14) configure_os_settings ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
