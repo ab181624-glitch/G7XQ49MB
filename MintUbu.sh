@@ -813,6 +813,285 @@ disable_root_login() {
 }
 
 #############################################
+# Repository Verification Module
+#############################################
+
+verify_repositories() {
+    print_header "REPOSITORY VERIFICATION MODULE"
+    print_info "This module verifies package sources and source code repositories are authorized"
+    
+    local changes_made=false
+    local suspicious_count=0
+    
+    # ========================================
+    # Part 1: Package Repository Verification
+    # ========================================
+    echo -e "\n${BOLD}${CYAN}═══ PACKAGE REPOSITORY VERIFICATION ═══${NC}"
+    print_info "Checking APT package sources for unauthorized repositories"
+    
+    if confirm_action "Scan for unauthorized package repositories?"; then
+        local suspicious_repos=()
+        
+        # Define authorized domains for package repositories
+        local authorized_domains=(
+            "ubuntu.com"
+            "canonical.com"
+            "linuxmint.com"
+            "debian.org"
+            "google.com"
+            "microsoft.com"
+            "dl.google.com"
+            "packages.microsoft.com"
+        )
+        
+        # Check /etc/apt/sources.list
+        echo -e "\n${CYAN}Checking /etc/apt/sources.list...${NC}"
+        
+        if [[ -f "/etc/apt/sources.list" ]]; then
+            while IFS= read -r line; do
+                # Skip comments and empty lines
+                [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+                
+                # Check if line contains any authorized domain
+                local is_authorized=false
+                for domain in "${authorized_domains[@]}"; do
+                    if echo "$line" | grep -q "$domain"; then
+                        is_authorized=true
+                        break
+                    fi
+                done
+                
+                if [[ "$is_authorized" == false ]]; then
+                    suspicious_repos+=("/etc/apt/sources.list: $line")
+                    ((suspicious_count++))
+                fi
+            done < /etc/apt/sources.list
+        fi
+        
+        # Check /etc/apt/sources.list.d/
+        if [[ -d "/etc/apt/sources.list.d" ]]; then
+            echo -e "${CYAN}Checking /etc/apt/sources.list.d/...${NC}"
+            
+            for repo_file in /etc/apt/sources.list.d/*.list; do
+                if [[ -f "$repo_file" ]]; then
+                    while IFS= read -r line; do
+                        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+                        
+                        local is_authorized=false
+                        for domain in "${authorized_domains[@]}"; do
+                            if echo "$line" | grep -q "$domain"; then
+                                is_authorized=true
+                                break
+                            fi
+                        done
+                        
+                        if [[ "$is_authorized" == false ]]; then
+                            suspicious_repos+=("$(basename "$repo_file"): $line")
+                            ((suspicious_count++))
+                        fi
+                    done < "$repo_file"
+                fi
+            done
+        fi
+        
+        # Report findings for package repositories
+        if [[ ${#suspicious_repos[@]} -gt 0 ]]; then
+            print_warning "Found ${#suspicious_repos[@]} potentially unauthorized package repository entry/entries"
+            
+            echo -e "\n${YELLOW}Suspicious package repositories:${NC}"
+            for repo in "${suspicious_repos[@]}"; do
+                echo -e "  ${RED}!${NC} $repo"
+            done
+            
+            if confirm_action "Review and remove unauthorized package repositories?"; then
+                echo -e "\n${YELLOW}Opening repository configuration...${NC}"
+                print_info "Review the file and remove any unauthorized entries"
+                print_info "Press Ctrl+X to exit nano, then Y to save"
+                
+                if confirm_action "Edit /etc/apt/sources.list?"; then
+                    cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%Y%m%d_%H%M%S)
+                    nano /etc/apt/sources.list
+                    print_success "Repository file backed up and edited"
+                    changes_made=true
+                fi
+                
+                if [[ -d "/etc/apt/sources.list.d" ]]; then
+                    if confirm_action "Review /etc/apt/sources.list.d/ files?"; then
+                        ls -lh /etc/apt/sources.list.d/
+                        
+                        for repo_file in /etc/apt/sources.list.d/*.list; do
+                            if [[ -f "$repo_file" ]]; then
+                                echo -e "\n${BOLD}File: $(basename "$repo_file")${NC}"
+                                cat "$repo_file"
+                                
+                                if confirm_action "Edit this file?"; then
+                                    cp "$repo_file" "${repo_file}.bak.$(date +%Y%m%d_%H%M%S)"
+                                    nano "$repo_file"
+                                    changes_made=true
+                                fi
+                                
+                                if confirm_action "Delete this repository file entirely?"; then
+                                    rm -f "$repo_file"
+                                    print_success "Removed: $(basename "$repo_file")"
+                                    changes_made=true
+                                    log_message "REMOVED UNAUTHORIZED PACKAGE REPOSITORY: $(basename "$repo_file")"
+                                fi
+                            fi
+                        done
+                    fi
+                fi
+                
+                if [[ "$changes_made" == true ]]; then
+                    print_info "Updating package lists after repository changes..."
+                    apt update
+                fi
+            fi
+        else
+            print_success "All package repositories appear to be from authorized sources"
+        fi
+    fi
+    
+    # ========================================
+    # Part 2: Source Code Repository Verification
+    # ========================================
+    echo -e "\n${BOLD}${CYAN}═══ SOURCE CODE REPOSITORY VERIFICATION ═══${NC}"
+    print_info "Checking for source code repositories (Git, SVN, etc.)"
+    
+    if confirm_action "Scan for source code repositories?"; then
+        local scm_repos=()
+        local suspicious_scm_repos=()
+        
+        # Define search paths (common locations for repositories)
+        local search_paths=(
+            "/home"
+            "/opt"
+            "/srv"
+            "/var/www"
+            "/usr/local/src"
+        )
+        
+        echo -e "\n${CYAN}Searching for version control repositories...${NC}"
+        print_info "This may take a moment..."
+        
+        # Search for Git repositories
+        for search_path in "${search_paths[@]}"; do
+            if [[ -d "$search_path" ]]; then
+                echo -e "${BLUE}[i]${NC} Scanning $search_path..."
+                
+                # Find .git directories (Git repos)
+                while IFS= read -r git_dir; do
+                    if [[ -n "$git_dir" ]]; then
+                        local repo_path=$(dirname "$git_dir")
+                        scm_repos+=("GIT: $repo_path")
+                        
+                        # Try to get remote URL
+                        local remote_url=""
+                        if [[ -f "$git_dir/config" ]]; then
+                            remote_url=$(grep -A 1 '\[remote "origin"\]' "$git_dir/config" 2>/dev/null | grep "url =" | cut -d'=' -f2- | xargs)
+                        fi
+                        
+                        if [[ -n "$remote_url" ]]; then
+                            scm_repos[${#scm_repos[@]}-1]="GIT: $repo_path > $remote_url"
+                            
+                            # Flag all external repos as needing review (nothing assumed trusted)
+                            if [[ ! "$remote_url" =~ ^/ ]]; then
+                                suspicious_scm_repos+=("GIT: $repo_path > ${YELLOW}$remote_url${NC}")
+                                ((suspicious_count++))
+                            fi
+                        fi
+                    fi
+                done < <(find "$search_path" -maxdepth 5 -type d -name ".git" 2>/dev/null)
+                
+                # Find .svn directories (Subversion repos)
+                while IFS= read -r svn_dir; do
+                    if [[ -n "$svn_dir" ]]; then
+                        local repo_path=$(dirname "$svn_dir")
+                        scm_repos+=("SVN: $repo_path")
+                        
+                        # All SVN repos flagged for review (nothing assumed trusted)
+                        if command -v svn &> /dev/null; then
+                            local svn_url=$(svn info "$repo_path" 2>/dev/null | grep "^URL:" | cut -d' ' -f2-)
+                            if [[ -n "$svn_url" ]]; then
+                                scm_repos[${#scm_repos[@]}-1]="SVN: $repo_path > $svn_url"
+                                suspicious_scm_repos+=("SVN: $repo_path > ${YELLOW}$svn_url${NC}")
+                                ((suspicious_count++))
+                            fi
+                        fi
+                    fi
+                done < <(find "$search_path" -maxdepth 5 -type d -name ".svn" 2>/dev/null)
+            fi
+        done
+        
+        # Report findings
+        if [[ ${#scm_repos[@]} -gt 0 ]]; then
+            echo -e "\n${BOLD}Found ${#scm_repos[@]} source code repository/repositories:${NC}"
+            
+            for repo in "${scm_repos[@]}"; do
+                echo -e "  ${BLUE}>${NC} $repo"
+            done
+            
+            if [[ ${#suspicious_scm_repos[@]} -gt 0 ]]; then
+                print_warning "Found ${#suspicious_scm_repos[@]} source code repository/repositories requiring review"
+                
+                echo -e "\n${YELLOW}Source code repositories found:${NC}"
+                for repo in "${suspicious_scm_repos[@]}"; do
+                    echo -e "  ${RED}!${NC} $repo"
+                done
+                
+                print_info "Review these repositories and verify they are authorized"
+                
+                if confirm_action "Review and delete suspicious repositories?"; then
+                    for repo in "${suspicious_scm_repos[@]}"; do
+                        # Extract path from the repo string (remove color codes and split on arrow)
+                        local repo_path=$(echo "$repo" | sed -e 's/^[^:]*: //' -e 's/ >.*//' -e 's/\x1b\[[0-9;]*m//g' | xargs)
+                        
+                        if [[ -d "$repo_path" ]]; then
+                            echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+                            echo -e "${BOLD}Repository: $repo_path${NC}"
+                            
+                            if [[ -d "$repo_path/.git" ]]; then
+                                echo -e "\n${YELLOW}Git Configuration:${NC}"
+                                cat "$repo_path/.git/config"
+                            elif [[ -d "$repo_path/.svn" ]]; then
+                                echo -e "\n${YELLOW}SVN Repository${NC}"
+                            fi
+                            
+                            if confirm_action "Delete this repository entirely? (WARNING: Cannot be undone)"; then
+                                rm -rf "$repo_path"
+                                print_success "Removed: $repo_path"
+                                changes_made=true
+                                log_message "REMOVED SUSPICIOUS SOURCE CODE REPOSITORY: $repo_path"
+                            fi
+                        fi
+                    done
+                fi
+            fi
+        else
+            print_success "No source code repositories found in common locations"
+        fi
+    fi
+    
+    # ========================================
+    # Summary
+    # ========================================
+    echo -e "\n${BOLD}Repository Verification Summary:${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}[i]${NC} Total suspicious repositories found: $suspicious_count"
+    
+    if [[ "$changes_made" == true ]]; then
+        print_success "Repository verification and cleanup completed"
+        print_info "Changes logged to: $LOG_FILE"
+    else
+        print_info "No changes were made during verification"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    print_header "REPOSITORY VERIFICATION COMPLETE"
+    press_enter
+}
+
+#############################################
 # Task 3: Firewall Configuration
 #############################################
 
@@ -1445,7 +1724,7 @@ audit_services() {
         "cups-browsed"
         "avahi-daemon"
 
-        # --- UPnP / Zeroconf (auto-discovery → security risk) ---
+        # --- UPnP / Zeroconf (auto-discovery - security risk) ---
         "avahi-daemon"
         "zeroconf"
         "bonjour"
@@ -1833,101 +2112,6 @@ audit_services() {
             if confirm_action "View full history.log file?"; then
                 less /var/log/apt/history.log
             fi
-        fi
-    fi
-    
-    # Part 9: Check for unauthorized repositories
-    echo -e "\n${BOLD}Step 5: Unauthorized Repository Check${NC}"
-    print_info "Checking package sources for unauthorized repositories"
-    
-    if confirm_action "Scan for potentially unauthorized repositories?"; then
-        local suspicious_repos=()
-        
-        # Check /etc/apt/sources.list
-        echo -e "\n${CYAN}Checking /etc/apt/sources.list...${NC}"
-        
-        # Look for non-standard repositories
-        while IFS= read -r line; do
-            # Skip comments and empty lines
-            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-            
-            # Check for suspicious/non-official repositories
-            if ! echo "$line" | grep -q "ubuntu.com\|canonical.com\|linuxmint.com"; then
-                # Not an official repo
-                suspicious_repos+=("$line")
-            fi
-        done < /etc/apt/sources.list
-        
-        # Check /etc/apt/sources.list.d/
-        if [[ -d "/etc/apt/sources.list.d" ]]; then
-            echo -e "\n${CYAN}Checking /etc/apt/sources.list.d/...${NC}"
-            
-            for repo_file in /etc/apt/sources.list.d/*.list; do
-                if [[ -f "$repo_file" ]]; then
-                    while IFS= read -r line; do
-                        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-                        
-                        if ! echo "$line" | grep -q "ubuntu.com\|canonical.com\|linuxmint.com\|google.com\|microsoft.com"; then
-                            suspicious_repos+=("$(basename "$repo_file"): $line")
-                        fi
-                    done < "$repo_file"
-                fi
-            done
-        fi
-        
-        if [[ ${#suspicious_repos[@]} -gt 0 ]]; then
-            print_warning "Found ${#suspicious_repos[@]} potentially unauthorized repository entry/entries"
-            
-            echo -e "\n${YELLOW}Suspicious repositories:${NC}"
-            for repo in "${suspicious_repos[@]}"; do
-                echo -e "  ${RED}!${NC} $repo"
-            done
-            
-            if confirm_action "Review and remove unauthorized repositories?"; then
-                echo -e "\n${YELLOW}Opening repository configuration...${NC}"
-                print_info "Review the file and remove any unauthorized entries"
-                print_info "Press Ctrl+X to exit nano, then Y to save"
-                
-                if confirm_action "Edit /etc/apt/sources.list?"; then
-                    cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%Y%m%d_%H%M%S)
-                    nano /etc/apt/sources.list
-                    print_success "Repository file backed up and edited"
-                    changes_made=true
-                fi
-                
-                if [[ -d "/etc/apt/sources.list.d" ]]; then
-                    if confirm_action "Review /etc/apt/sources.list.d/ files?"; then
-                        ls -lh /etc/apt/sources.list.d/
-                        
-                        for repo_file in /etc/apt/sources.list.d/*.list; do
-                            if [[ -f "$repo_file" ]]; then
-                                echo -e "\n${BOLD}File: $(basename "$repo_file")${NC}"
-                                cat "$repo_file"
-                                
-                                if confirm_action "Edit this file?"; then
-                                    cp "$repo_file" "${repo_file}.bak.$(date +%Y%m%d_%H%M%S)"
-                                    nano "$repo_file"
-                                    changes_made=true
-                                fi
-                                
-                                if confirm_action "Delete this repository file entirely?"; then
-                                    rm -f "$repo_file"
-                                    print_success "Removed: $(basename "$repo_file")"
-                                    changes_made=true
-                                    log_message "REMOVED UNAUTHORIZED REPOSITORY: $(basename "$repo_file")"
-                                fi
-                            fi
-                        done
-                    fi
-                fi
-                
-                if [[ "$changes_made" == true ]]; then
-                    print_info "Updating package lists after repository changes..."
-                    apt update
-                fi
-            fi
-        else
-            print_success "All repositories appear to be from official sources"
         fi
     fi
     
@@ -4390,13 +4574,14 @@ show_menu() {
     echo -e "${GREEN} 3)${NC} Configure Firewall (UFW)"
     echo -e "${GREEN} 4)${NC} Configure Password Policies (Aging, Faillock)"
     echo -e "${GREEN} 5)${NC} Audit Services"
-    echo -e "${GREEN} 6)${NC} Audit File Permissions"
-    echo -e "${GREEN} 7)${NC} Update System"
-    echo -e "${GREEN} 8)${NC} Remove Prohibited Software"
-    echo -e "${GREEN} 9)${NC} Harden SSH Configuration"
-    echo -e "${GREEN}10)${NC} Harden FTP Server (vsftpd)"
-    echo -e "${GREEN}11)${NC} Enable Security Features"
-    echo -e "${RED}12)${NC} Complete Password Complexity & PAM Config ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
+    echo -e "${GREEN} 6)${NC} Verify Repositories (Package & Source Code)"
+    echo -e "${GREEN} 7)${NC} Audit File Permissions"
+    echo -e "${GREEN} 8)${NC} Update System"
+    echo -e "${GREEN} 9)${NC} Remove Prohibited Software"
+    echo -e "${GREEN}10)${NC} Harden SSH Configuration"
+    echo -e "${GREEN}11)${NC} Harden FTP Server (vsftpd)"
+    echo -e "${GREEN}12)${NC} Enable Security Features"
+    echo -e "${RED}13)${NC} Complete Password Complexity & PAM Config ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -4421,13 +4606,14 @@ main() {
             3) configure_firewall ;;
             4) configure_password_policy ;;
             5) audit_services ;;
-            6) audit_file_permissions ;;
-            7) update_system ;;
-            8) remove_prohibited_software ;;
-            9) harden_ssh ;;
-            10) harden_ftp ;;
-            11) enable_security_features ;;
-            12) complete_password_pam_configuration ;;
+            6) verify_repositories ;;
+            7) audit_file_permissions ;;
+            8) update_system ;;
+            9) remove_prohibited_software ;;
+            10) harden_ssh ;;
+            11) harden_ftp ;;
+            12) enable_security_features ;;
+            13) complete_password_pam_configuration ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
