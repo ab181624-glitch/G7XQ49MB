@@ -2984,8 +2984,8 @@ done
 
 echo -e "${YELLOW}Files found:${NC}"
 for file in "${found_files[@]}"; do
-    local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
-    local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
+    file_size=$(du -h "$file" 2>/dev/null | cut -f1)
+    file_owner=$(stat -c "%U" "$file" 2>/dev/null)
     echo -e "  ${RED}!${NC} $file (${file_size}, owner: ${file_owner})"
 done
 
@@ -3008,9 +3008,9 @@ case "$option" in
         files_kept=0
         
         for file in "${found_files[@]}"; do
-            local file_size=$(du -h "$file" 2>/dev/null | cut -f1)
-            local file_owner=$(stat -c "%U" "$file" 2>/dev/null)
-            local file_modified=$(stat -c "%y" "$file" 2>/dev/null | cut -d' ' -f1)
+            file_size=$(du -h "$file" 2>/dev/null | cut -f1)
+            file_owner=$(stat -c "%U" "$file" 2>/dev/null)
+            file_modified=$(stat -c "%y" "$file" 2>/dev/null | cut -d' ' -f1)
             
             echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
             echo -e "${BOLD}File:${NC} $file"
@@ -3063,7 +3063,7 @@ case "$option" in
         echo -e "${GREEN}✓${NC} Deleted $files_removed file(s)"
         ;;
     3)
-        local output_file="/tmp/media_files_found_full_$(date +%Y%m%d_%H%M%S).txt"
+        output_file="/tmp/media_files_found_full_$(date +%Y%m%d_%H%M%S).txt"
         printf "%s\n" "${found_files[@]}" > "$output_file"
         echo ""
         echo -e "${GREEN}✓${NC} File list saved to: $output_file"
@@ -3087,43 +3087,21 @@ SCANNER_EOF
 
     chmod +x "$scanner_script"
     
-    # Launch full system scanner in background
-    echo -e "\n${BOLD}Launching full system scanner in separate terminal...${NC}"
-    print_info "The scanner will scan the entire system in a new terminal window"
-    print_info "You can continue using this script while the scan proceeds"
+    # Generate command for user to run in new terminal
+    echo -e "\n${BOLD}Full System Scanner Ready${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    print_info "Scanner script created at: $scanner_script"
+    print_info "To run the full system scan, open a NEW terminal window and run:"
     echo ""
-    
-    if ! confirm_action "Launch background media file scanner?"; then
-        print_info "Media file scan cancelled"
-        rm -f "$scanner_script"
-        press_enter
-        return
-    fi
-    
-    # Detect which terminal emulator to use
-    if command -v gnome-terminal &>/dev/null; then
-        gnome-terminal -- bash -c "sudo $scanner_script" &
-        print_success "Full system scanner launched in GNOME Terminal"
-    elif command -v xterm &>/dev/null; then
-        xterm -hold -e "sudo $scanner_script" &
-        print_success "Full system scanner launched in xterm"
-    elif command -v konsole &>/dev/null; then
-        konsole -e "sudo $scanner_script" &
-        print_success "Full system scanner launched in Konsole"
-    elif command -v xfce4-terminal &>/dev/null; then
-        xfce4-terminal --hold -e "sudo $scanner_script" &
-        print_success "Full system scanner launched in XFCE Terminal"
-    else
-        print_warning "No terminal emulator found - running in background without window"
-        print_info "Check /var/log/media_scan_full_*.log for results"
-        nohup sudo "$scanner_script" > /dev/null 2>&1 &
-    fi
-    
-    local scanner_pid=$!
-    print_info "Scanner PID: $scanner_pid"
-    print_info "Full system scan logs will be saved to: /var/log/media_scan_full_*.log"
+    echo -e "${GREEN}${BOLD}    sudo $scanner_script${NC}"
     echo ""
-    print_success "Full system scanner started in background - you can continue with other tasks"
+    print_info "The scan will run in that terminal while you continue here"
+    print_info "Results will be logged to: /var/log/media_scan_full_*.log"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    print_success "Full system scanner is ready to use"
+    echo ""
+    print_info "NOTE: The script will be deleted on system reboot (it's in /tmp)"
     
     # Part 4.5: Backdoor Detection
     echo -e "\n${BOLD}Step 3.5: Backdoor Detection${NC}"
