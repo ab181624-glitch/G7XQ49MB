@@ -118,6 +118,14 @@ EOF
 user_auditing() {
     print_header "USER AUDITING MODULE"
     
+    # Show currently logged in users
+    echo -e "\n${BOLD}Currently Logged In Users:${NC}"
+    print_info "Showing active user sessions with 'w' command"
+    echo ""
+    w
+    echo ""
+    press_enter
+    
     # Get main username
     echo -e "${CYAN}Enter the main username (currently logged in user):${NC}"
     read -r MAIN_USER
@@ -5333,6 +5341,456 @@ EOF
 }
 
 #############################################
+# Task 15: Application Security Hardening
+#############################################
+
+harden_application_security() {
+    print_header "APPLICATION SECURITY HARDENING"
+    print_info "This module hardens application-specific security settings"
+    echo ""
+    
+    local changes_made=false
+    
+    # Detect which applications are installed
+    echo -e "${BOLD}Detecting Installed Applications...${NC}"
+    
+    local has_apache=false
+    local has_nginx=false
+    local has_mysql=false
+    local has_mariadb=false
+    local has_postgresql=false
+    
+    if command -v apache2 &>/dev/null || systemctl list-unit-files apache2.service &>/dev/null; then
+        print_info "Apache detected"
+        has_apache=true
+    fi
+    
+    if command -v nginx &>/dev/null || systemctl list-unit-files nginx.service &>/dev/null; then
+        print_info "Nginx detected"
+        has_nginx=true
+    fi
+    
+    if command -v mysql &>/dev/null || systemctl list-unit-files mysql.service &>/dev/null; then
+        print_info "MySQL detected"
+        has_mysql=true
+    fi
+    
+    if command -v mariadb &>/dev/null || systemctl list-unit-files mariadb.service &>/dev/null; then
+        print_info "MariaDB detected"
+        has_mariadb=true
+    fi
+    
+    if command -v psql &>/dev/null || systemctl list-unit-files postgresql.service &>/dev/null; then
+        print_info "PostgreSQL detected"
+        has_postgresql=true
+    fi
+    
+    if [[ "$has_apache" == false && "$has_nginx" == false && "$has_mysql" == false && "$has_mariadb" == false && "$has_postgresql" == false ]]; then
+        print_warning "No supported applications detected"
+        print_info "Supported: Apache, Nginx, MySQL, MariaDB, PostgreSQL"
+        press_enter
+        return
+    fi
+    
+    echo ""
+    
+    # Apache Hardening
+    if [[ "$has_apache" == true ]]; then
+        echo -e "\n${BOLD}════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}APACHE WEB SERVER HARDENING${NC}"
+        echo -e "${BOLD}════════════════════════════════════════════════════════════${NC}"
+        
+        if confirm_action "Harden Apache configuration?"; then
+            local apache_security="/etc/apache2/conf-available/security.conf"
+            local apache_conf="/etc/apache2/apache2.conf"
+            
+            # 1. ServerTokens and ServerSignature
+            if [[ -f "$apache_security" ]]; then
+                cp "$apache_security" "${apache_security}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                # ServerTokens Prod (minimal version disclosure)
+                if grep -q "^ServerTokens" "$apache_security"; then
+                    sed -i 's/^ServerTokens.*/ServerTokens Prod/' "$apache_security"
+                else
+                    echo "ServerTokens Prod" >> "$apache_security"
+                fi
+                print_success "Set ServerTokens to Prod (minimal info disclosure)"
+                
+                # ServerSignature Off
+                if grep -q "^ServerSignature" "$apache_security"; then
+                    sed -i 's/^ServerSignature.*/ServerSignature Off/' "$apache_security"
+                else
+                    echo "ServerSignature Off" >> "$apache_security"
+                fi
+                print_success "Disabled ServerSignature"
+                
+                # TraceEnable Off (prevent XST attacks)
+                if ! grep -q "^TraceEnable" "$apache_security"; then
+                    echo "TraceEnable Off" >> "$apache_security"
+                    print_success "Disabled TRACE method (XST protection)"
+                fi
+                
+                changes_made=true
+            fi
+            
+            # 2. Disable directory listing
+            if [[ -f "$apache_conf" ]]; then
+                if grep -q "Options Indexes" "$apache_conf"; then
+                    sed -i 's/Options Indexes/Options -Indexes/' "$apache_conf"
+                    print_success "Disabled directory listing"
+                    changes_made=true
+                fi
+            fi
+            
+            # 3. Enable security modules
+            print_info "Enabling Apache security modules..."
+            
+            # Enable mod_headers for security headers
+            a2enmod headers &>/dev/null
+            print_success "Enabled mod_headers"
+            
+            # Enable mod_rewrite
+            a2enmod rewrite &>/dev/null
+            print_success "Enabled mod_rewrite"
+            
+            # Disable unnecessary modules
+            for mod in status autoindex; do
+                if a2query -m "$mod" &>/dev/null; then
+                    a2dismod "$mod" &>/dev/null
+                    print_success "Disabled module: $mod"
+                fi
+            done
+            
+            # 4. Create security headers configuration
+            cat > /etc/apache2/conf-available/security-headers.conf << 'EOF'
+# Security Headers Configuration
+<IfModule mod_headers.c>
+    # Prevent clickjacking
+    Header always set X-Frame-Options "SAMEORIGIN"
+    
+    # XSS Protection
+    Header always set X-XSS-Protection "1; mode=block"
+    
+    # Prevent MIME sniffing
+    Header always set X-Content-Type-Options "nosniff"
+    
+    # Referrer Policy
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    
+    # Content Security Policy (restrictive - adjust as needed)
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
+    
+    # Remove server banner from response
+    Header always unset X-Powered-By
+    Header always unset Server
+</IfModule>
+
+# Disable HTTP 1.0 protocol
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{THE_REQUEST} !HTTP/1\.1$
+    RewriteRule .* - [F]
+</IfModule>
+EOF
+            
+            a2enconf security-headers &>/dev/null
+            print_success "Configured security headers"
+            
+            # 5. SSL/TLS Configuration (if mod_ssl is available)
+            if a2query -m ssl &>/dev/null; then
+                cat > /etc/apache2/mods-available/ssl-hardening.conf << 'EOF'
+# SSL/TLS Hardening Configuration
+<IfModule mod_ssl.c>
+    # Use only TLS 1.2 and 1.3
+    SSLProtocol -all +TLSv1.2 +TLSv1.3
+    
+    # Strong cipher suites
+    SSLCipherSuite HIGH:!aNULL:!MD5:!3DES:!RC4:!EXPORT
+    SSLHonorCipherOrder on
+    
+    # Enable HSTS (HTTP Strict Transport Security)
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    
+    # OCSP Stapling
+    SSLUseStapling on
+    SSLStaplingCache "shmcb:logs/ssl_stapling(32768)"
+</IfModule>
+EOF
+                print_success "Configured SSL/TLS hardening"
+            fi
+            
+            # 6. Limit request size
+            if [[ -f "$apache_security" ]]; then
+                if ! grep -q "LimitRequestBody" "$apache_security"; then
+                    echo "LimitRequestBody 10485760" >> "$apache_security"
+                    print_success "Limited request body size to 10MB"
+                fi
+            fi
+            
+            # 7. Timeout configuration
+            if [[ -f "$apache_conf" ]]; then
+                if grep -q "^Timeout" "$apache_conf"; then
+                    sed -i 's/^Timeout.*/Timeout 60/' "$apache_conf"
+                else
+                    echo "Timeout 60" >> "$apache_conf"
+                fi
+                print_success "Set connection timeout to 60 seconds"
+            fi
+            
+            # Test configuration and restart
+            if apache2ctl configtest &>/dev/null; then
+                systemctl restart apache2
+                print_success "Apache configuration valid - restarted service"
+            else
+                print_error "Apache configuration test failed - NOT restarted"
+                print_info "Run 'apache2ctl configtest' to see errors"
+            fi
+            
+            changes_made=true
+        fi
+    fi
+    
+    # Nginx Hardening
+    if [[ "$has_nginx" == true ]]; then
+        echo -e "\n${BOLD}════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}NGINX WEB SERVER HARDENING${NC}"
+        echo -e "${BOLD}════════════════════════════════════════════════════════════${NC}"
+        
+        if confirm_action "Harden Nginx configuration?"; then
+            local nginx_conf="/etc/nginx/nginx.conf"
+            
+            if [[ -f "$nginx_conf" ]]; then
+                cp "$nginx_conf" "${nginx_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                # 1. Hide version number
+                if ! grep -q "server_tokens off;" "$nginx_conf"; then
+                    sed -i '/http {/a \    server_tokens off;' "$nginx_conf"
+                    print_success "Disabled server version disclosure"
+                fi
+                
+                # 2. Client body size limit
+                if ! grep -q "client_max_body_size" "$nginx_conf"; then
+                    sed -i '/http {/a \    client_max_body_size 10M;' "$nginx_conf"
+                    print_success "Limited client body size to 10MB"
+                fi
+                
+                # 3. Buffer overflow protection
+                if ! grep -q "client_body_buffer_size" "$nginx_conf"; then
+                    sed -i '/http {/a \    client_body_buffer_size 1K;\n    client_header_buffer_size 1k;\n    large_client_header_buffers 2 1k;' "$nginx_conf"
+                    print_success "Configured buffer overflow protection"
+                fi
+                
+                # 4. Timeout settings
+                if ! grep -q "client_body_timeout" "$nginx_conf"; then
+                    sed -i '/http {/a \    client_body_timeout 10;\n    client_header_timeout 10;\n    keepalive_timeout 5 5;\n    send_timeout 10;' "$nginx_conf"
+                    print_success "Configured security timeouts"
+                fi
+                
+                # 5. Create security headers file
+                cat > /etc/nginx/conf.d/security-headers.conf << 'EOF'
+# Security Headers
+add_header X-Frame-Options "SAMEORIGIN" always;
+add_header X-XSS-Protection "1; mode=block" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';" always;
+
+# Remove server header
+more_clear_headers Server;
+EOF
+                print_success "Configured security headers"
+                
+                # 6. SSL/TLS Configuration
+                cat > /etc/nginx/conf.d/ssl-hardening.conf << 'EOF'
+# SSL/TLS Hardening
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers on;
+ssl_ciphers HIGH:!aNULL:!MD5:!3DES:!RC4:!EXPORT;
+ssl_session_cache shared:SSL:10m;
+ssl_session_timeout 10m;
+
+# HSTS
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+EOF
+                print_success "Configured SSL/TLS hardening"
+                
+                # Test configuration and restart
+                if nginx -t &>/dev/null; then
+                    systemctl restart nginx
+                    print_success "Nginx configuration valid - restarted service"
+                else
+                    print_error "Nginx configuration test failed - NOT restarted"
+                    print_info "Run 'nginx -t' to see errors"
+                fi
+                
+                changes_made=true
+            else
+                print_error "Nginx configuration file not found"
+            fi
+        fi
+    fi
+    
+    # MySQL/MariaDB Hardening
+    if [[ "$has_mysql" == true || "$has_mariadb" == true ]]; then
+        echo -e "\n${BOLD}════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}MYSQL/MARIADB DATABASE HARDENING${NC}"
+        echo -e "${BOLD}════════════════════════════════════════════════════════════${NC}"
+        
+        if confirm_action "Harden MySQL/MariaDB configuration?"; then
+            local mysql_conf="/etc/mysql/mysql.conf.d/mysqld.cnf"
+            [[ ! -f "$mysql_conf" ]] && mysql_conf="/etc/mysql/my.cnf"
+            
+            if [[ -f "$mysql_conf" ]]; then
+                cp "$mysql_conf" "${mysql_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                # 1. Bind to localhost only (unless this is a database server)
+                if confirm_action "Bind MySQL to localhost only? (No remote connections)"; then
+                    if grep -q "^bind-address" "$mysql_conf"; then
+                        sed -i 's/^bind-address.*/bind-address = 127.0.0.1/' "$mysql_conf"
+                    else
+                        echo "bind-address = 127.0.0.1" >> "$mysql_conf"
+                    fi
+                    print_success "MySQL bound to localhost only"
+                fi
+                
+                # 2. Disable local_infile (prevents LOCAL INFILE attacks)
+                if ! grep -q "^local-infile" "$mysql_conf"; then
+                    echo "local-infile = 0" >> "$mysql_conf"
+                    print_success "Disabled LOCAL INFILE"
+                fi
+                
+                # 3. Enable strict SQL mode
+                if ! grep -q "^sql-mode" "$mysql_conf"; then
+                    echo "sql-mode = STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION" >> "$mysql_conf"
+                    print_success "Enabled strict SQL mode"
+                fi
+                
+                # 4. Set log file for errors
+                if ! grep -q "^log-error" "$mysql_conf"; then
+                    echo "log-error = /var/log/mysql/error.log" >> "$mysql_conf"
+                    print_success "Configured error logging"
+                fi
+                
+                # 5. Limit connections
+                if ! grep -q "^max_connections" "$mysql_conf"; then
+                    echo "max_connections = 100" >> "$mysql_conf"
+                    print_success "Limited max connections to 100"
+                fi
+                
+                # 6. Connection timeout
+                if ! grep -q "^connect_timeout" "$mysql_conf"; then
+                    echo "connect_timeout = 10" >> "$mysql_conf"
+                    echo "wait_timeout = 600" >> "$mysql_conf"
+                    echo "interactive_timeout = 600" >> "$mysql_conf"
+                    print_success "Configured connection timeouts"
+                fi
+                
+                # Restart MySQL/MariaDB
+                if systemctl is-active mysql &>/dev/null; then
+                    systemctl restart mysql
+                    print_success "MySQL restarted"
+                elif systemctl is-active mariadb &>/dev/null; then
+                    systemctl restart mariadb
+                    print_success "MariaDB restarted"
+                fi
+                
+                changes_made=true
+            else
+                print_error "MySQL configuration file not found"
+            fi
+            
+            # Run mysql_secure_installation
+            print_warning "It's recommended to run mysql_secure_installation"
+            if confirm_action "Run mysql_secure_installation now?"; then
+                mysql_secure_installation
+                print_success "Completed mysql_secure_installation"
+            fi
+        fi
+    fi
+    
+    # PostgreSQL Hardening
+    if [[ "$has_postgresql" == true ]]; then
+        echo -e "\n${BOLD}════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}POSTGRESQL DATABASE HARDENING${NC}"
+        echo -e "${BOLD}════════════════════════════════════════════════════════════${NC}"
+        
+        if confirm_action "Harden PostgreSQL configuration?"; then
+            # Find PostgreSQL version and config directory
+            local pg_version=$(psql --version 2>/dev/null | grep -oP '\d+' | head -1)
+            local pg_conf="/etc/postgresql/$pg_version/main/postgresql.conf"
+            local pg_hba="/etc/postgresql/$pg_version/main/pg_hba.conf"
+            
+            if [[ -f "$pg_conf" ]]; then
+                cp "$pg_conf" "${pg_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                # 1. Listen on localhost only
+                if confirm_action "Configure PostgreSQL to listen on localhost only?"; then
+                    if grep -q "^listen_addresses" "$pg_conf"; then
+                        sed -i "s/^listen_addresses.*/listen_addresses = 'localhost'/" "$pg_conf"
+                    else
+                        echo "listen_addresses = 'localhost'" >> "$pg_conf"
+                    fi
+                    print_success "PostgreSQL listening on localhost only"
+                fi
+                
+                # 2. Enable SSL
+                if ! grep -q "^ssl = on" "$pg_conf"; then
+                    sed -i "s/^#ssl = off/ssl = on/" "$pg_conf"
+                    sed -i "s/^ssl = off/ssl = on/" "$pg_conf"
+                    print_success "Enabled SSL for PostgreSQL"
+                fi
+                
+                # 3. Configure logging
+                if ! grep -q "^log_connections" "$pg_conf"; then
+                    echo "log_connections = on" >> "$pg_conf"
+                    echo "log_disconnections = on" >> "$pg_conf"
+                    echo "log_duration = on" >> "$pg_conf"
+                    print_success "Enabled connection logging"
+                fi
+                
+                # 4. Connection limits
+                if ! grep -q "^max_connections" "$pg_conf"; then
+                    echo "max_connections = 100" >> "$pg_conf"
+                    print_success "Limited max connections to 100"
+                fi
+                
+                changes_made=true
+            fi
+            
+            # Configure pg_hba.conf
+            if [[ -f "$pg_hba" ]]; then
+                cp "$pg_hba" "${pg_hba}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                print_info "PostgreSQL authentication configuration:"
+                print_info "  - Ensure only 'md5' or 'scram-sha-256' auth methods are used"
+                print_info "  - Remove 'trust' authentication if present"
+                
+                if confirm_action "Review pg_hba.conf now?"; then
+                    nano "$pg_hba"
+                    print_info "Review complete"
+                fi
+            fi
+            
+            # Restart PostgreSQL
+            systemctl restart postgresql
+            print_success "PostgreSQL restarted"
+        fi
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    if [[ "$changes_made" == true ]]; then
+        print_success "Application security hardening completed"
+        print_info "Services have been restarted where needed"
+    else
+        print_info "No changes were made"
+    fi
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    
+    press_enter
+}
+
+#############################################
 # Main Menu
 #############################################
 
@@ -5352,6 +5810,7 @@ show_menu() {
     echo -e "${GREEN}12)${NC} Enable Security Features"
     echo -e "${RED}13)${NC} Complete Password Complexity & PAM Config ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
     echo -e "${GREEN}14)${NC} OS Settings (Screen Lock, Bluetooth, Updates, Kernel, Boot)"
+    echo -e "${GREEN}15)${NC} Application Security (Apache, Nginx, MySQL, PostgreSQL)"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -5385,6 +5844,7 @@ main() {
             12) enable_security_features ;;
             13) complete_password_pam_configuration ;;
             14) configure_os_settings ;;
+            15) harden_application_security ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
