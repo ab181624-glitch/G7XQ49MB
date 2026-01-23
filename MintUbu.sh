@@ -1525,7 +1525,19 @@ audit_services() {
     local packages_removed=0
     local services_disabled=0
     
-    # Define prohibited packages
+    # LAMP Detection - Don't remove LAMP components if they're required
+    local lamp_required=false
+    echo -e "\n${BOLD}${YELLOW}IMPORTANT: LAMP Stack Detection${NC}"
+    print_info "If this system runs a LAMP stack (Apache, MySQL, PHP), those should NOT be removed."
+    
+    if confirm_action "Is this system running a LAMP stack (Apache/MySQL/PHP required)?"; then
+        lamp_required=true
+        print_success "LAMP mode enabled - Apache, MySQL, PHP will be PROTECTED"
+    else
+        print_warning "LAMP components may be flagged for removal"
+    fi
+    
+    # Define prohibited packages (LAMP-aware)
     local prohibited_packages=(
     # Remote Access / Backdoors / RATS
     "telnet"
@@ -1773,9 +1785,26 @@ audit_services() {
     echo -e "\n${BOLD}Step 1: Scanning for prohibited packages...${NC}"
     print_info "Checking for hacking tools, unnecessary servers, and prohibited software"
     
+    # LAMP protected packages
+    local lamp_protected=("apache2" "apache" "mysql-server" "mysql-client" "mysql-common" "mariadb-server" "mariadb-client" "php" "php-mysql" "php-common" "libapache2-mod-php")
+    
     declare -a found_packages=()
     
     for pkg in "${prohibited_packages[@]}"; do
+        # Skip LAMP packages if LAMP is required
+        if [[ "$lamp_required" == true ]]; then
+            local is_lamp_pkg=false
+            for lamp_pkg in "${lamp_protected[@]}"; do
+                if [[ "$pkg" == "$lamp_pkg" ]]; then
+                    is_lamp_pkg=true
+                    break
+                fi
+            done
+            if [[ "$is_lamp_pkg" == true ]]; then
+                continue
+            fi
+        fi
+        
         if dpkg -l | grep -q "^ii.*$pkg"; then
             found_packages+=("$pkg")
         fi
@@ -5791,11 +5820,1295 @@ EOF
 }
 
 #############################################
+# Task 16: LAMP Stack - Apache Hardening
+#############################################
+
+harden_apache() {
+    print_header "APACHE WEB SERVER HARDENING"
+    print_info "Comprehensive Apache security hardening for LAMP stack"
+    echo ""
+    
+    # Check if Apache is installed
+    if ! command -v apache2 &>/dev/null && ! systemctl list-unit-files apache2.service &>/dev/null; then
+        print_warning "Apache is not installed on this system"
+        press_enter
+        return
+    fi
+    
+    local changes_made=false
+    local apache_security="/etc/apache2/conf-available/security.conf"
+    local apache_conf="/etc/apache2/apache2.conf"
+    
+    echo -e "${BOLD}This will apply comprehensive Apache hardening.${NC}"
+    echo -e "${CYAN}Safe operations will be applied automatically.${NC}"
+    echo -e "${YELLOW}Potentially breaking changes will be skipped or prompted.${NC}"
+    echo ""
+    
+    if ! confirm_action "Apply Apache security hardening?"; then
+        print_info "Skipping Apache hardening"
+        press_enter
+        return
+    fi
+    
+    # Backup configs
+    [[ -f "$apache_security" ]] && cp "$apache_security" "${apache_security}.bak.$(date +%Y%m%d_%H%M%S)"
+    [[ -f "$apache_conf" ]] && cp "$apache_conf" "${apache_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+    
+    echo -e "\n${BOLD}═══ SAFE OPERATIONS (Auto-applying) ═══${NC}"
+    
+    # === SAFE: ServerTokens Prod ===
+    if [[ -f "$apache_security" ]]; then
+        if grep -q "^ServerTokens" "$apache_security"; then
+            sed -i 's/^ServerTokens.*/ServerTokens Prod/' "$apache_security"
+        else
+            echo "ServerTokens Prod" >> "$apache_security"
+        fi
+        print_success "ServerTokens set to Prod (hide version)"
+        
+        # === SAFE: ServerSignature Off ===
+        if grep -q "^ServerSignature" "$apache_security"; then
+            sed -i 's/^ServerSignature.*/ServerSignature Off/' "$apache_security"
+        else
+            echo "ServerSignature Off" >> "$apache_security"
+        fi
+        print_success "ServerSignature disabled"
+        
+        # === SAFE: TraceEnable Off ===
+        if ! grep -q "^TraceEnable" "$apache_security"; then
+            echo "TraceEnable Off" >> "$apache_security"
+        else
+            sed -i 's/^TraceEnable.*/TraceEnable Off/' "$apache_security"
+        fi
+        print_success "TRACE method disabled (XST protection)"
+        
+        # === SAFE: FileETag None (obscure - prevents inode disclosure) ===
+        if ! grep -q "^FileETag" "$apache_security"; then
+            echo "FileETag None" >> "$apache_security"
+        fi
+        print_success "FileETag disabled (inode disclosure protection)"
+        
+        # === SAFE: Timeout ===
+        if ! grep -q "^Timeout" "$apache_security"; then
+            echo "Timeout 60" >> "$apache_security"
+        fi
+        print_success "Connection timeout set to 60 seconds"
+        
+        # === SAFE: LimitRequestBody ===
+        if ! grep -q "^LimitRequestBody" "$apache_security"; then
+            echo "LimitRequestBody 10485760" >> "$apache_security"
+        fi
+        print_success "Request body limit set to 10MB"
+        
+        # === SAFE: LimitRequestFields ===
+        if ! grep -q "^LimitRequestFields" "$apache_security"; then
+            echo "LimitRequestFields 100" >> "$apache_security"
+        fi
+        print_success "Request header count limited to 100"
+        
+        # === SAFE: LimitRequestFieldSize ===
+        if ! grep -q "^LimitRequestFieldSize" "$apache_security"; then
+            echo "LimitRequestFieldSize 8190" >> "$apache_security"
+        fi
+        print_success "Request header size limited to 8KB"
+        
+        # === SAFE: LimitRequestLine ===
+        if ! grep -q "^LimitRequestLine" "$apache_security"; then
+            echo "LimitRequestLine 8190" >> "$apache_security"
+        fi
+        print_success "Request line (URL) size limited to 8KB"
+        
+        changes_made=true
+    fi
+    
+    # === SAFE: Security Headers ===
+    echo -e "\n${BOLD}Configuring security headers...${NC}"
+    cat > /etc/apache2/conf-available/security-headers.conf << 'EOF'
+# CyberPatriot Security Headers Configuration
+<IfModule mod_headers.c>
+    # Prevent clickjacking
+    Header always set X-Frame-Options "SAMEORIGIN"
+    
+    # XSS Protection
+    Header always set X-XSS-Protection "1; mode=block"
+    
+    # Prevent MIME sniffing
+    Header always set X-Content-Type-Options "nosniff"
+    
+    # Referrer Policy
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    
+    # Permissions Policy (obscure - often missed)
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+    
+    # Cross-domain policy (obscure - Flash/PDF)
+    Header always set X-Permitted-Cross-Domain-Policies "none"
+    
+    # Remove version disclosure headers
+    Header always unset X-Powered-By
+    Header unset X-Powered-By
+</IfModule>
+EOF
+    a2enconf security-headers &>/dev/null
+    print_success "Security headers configured"
+    
+    # === SAFE: Enable required modules ===
+    a2enmod headers &>/dev/null && print_success "Enabled mod_headers"
+    a2enmod rewrite &>/dev/null && print_success "Enabled mod_rewrite"
+    
+    # === SAFE: Disable info-leaking modules ===
+    a2dismod status &>/dev/null 2>&1 && print_success "Disabled mod_status (info leak)"
+    a2dismod info &>/dev/null 2>&1 && print_success "Disabled mod_info (info leak)"
+    
+    # === SAFE: Disable directory listing in main config ===
+    if [[ -f "$apache_conf" ]]; then
+        if grep -q "Options Indexes" "$apache_conf"; then
+            sed -i 's/Options Indexes/Options -Indexes/g' "$apache_conf"
+            print_success "Disabled directory listing (Options -Indexes)"
+        fi
+    fi
+    
+    # === SAFE: KeepAlive settings ===
+    if [[ -f "$apache_conf" ]]; then
+        if grep -q "^MaxKeepAliveRequests" "$apache_conf"; then
+            sed -i 's/^MaxKeepAliveRequests.*/MaxKeepAliveRequests 100/' "$apache_conf"
+        elif grep -q "^#MaxKeepAliveRequests" "$apache_conf"; then
+            sed -i 's/^#MaxKeepAliveRequests.*/MaxKeepAliveRequests 100/' "$apache_conf"
+        fi
+        
+        if grep -q "^KeepAliveTimeout" "$apache_conf"; then
+            sed -i 's/^KeepAliveTimeout.*/KeepAliveTimeout 5/' "$apache_conf"
+        elif grep -q "^#KeepAliveTimeout" "$apache_conf"; then
+            sed -i 's/^#KeepAliveTimeout.*/KeepAliveTimeout 5/' "$apache_conf"
+        fi
+        print_success "KeepAlive settings optimized"
+    fi
+    
+    echo -e "\n${BOLD}═══ CAUTION OPERATIONS ═══${NC}"
+    
+    # === CAUTION: Disable autoindex (could break if no index file) ===
+    if a2query -m autoindex &>/dev/null 2>&1; then
+        print_warning "mod_autoindex provides directory listing fallback"
+        if confirm_action "Disable mod_autoindex? (Only if index.php/html exists everywhere)"; then
+            a2dismod autoindex &>/dev/null
+            print_success "Disabled mod_autoindex"
+        fi
+    fi
+    
+    # === CAUTION: Disable userdir (~user directories) ===
+    if a2query -m userdir &>/dev/null 2>&1; then
+        a2dismod userdir &>/dev/null
+        print_success "Disabled mod_userdir (~user directories)"
+    fi
+    
+    # === CAUTION: Disable negotiation (can leak file info) ===
+    if a2query -m negotiation &>/dev/null 2>&1; then
+        a2dismod negotiation &>/dev/null
+        print_success "Disabled mod_negotiation (file info leak)"
+    fi
+    
+    # === Enable security config ===
+    a2enconf security &>/dev/null
+    
+    # === SKIP DANGEROUS: Not disabling CGI, not blocking HTTP methods, not setting AllowOverride None ===
+    echo -e "\n${BOLD}═══ SKIPPED (Could break OrangeHRM) ═══${NC}"
+    print_info "Skipped: mod_cgi disable (may be needed)"
+    print_info "Skipped: HTTP method restrictions (breaks REST)"
+    print_info "Skipped: AllowOverride None (breaks .htaccess)"
+    print_info "Skipped: HTTP/1.0 blocking (legacy compatibility)"
+    
+    # Test and restart
+    echo -e "\n${BOLD}Testing Apache configuration...${NC}"
+    if apache2ctl configtest 2>&1 | grep -q "Syntax OK"; then
+        print_success "Apache configuration syntax OK"
+        systemctl restart apache2
+        print_success "Apache restarted"
+    else
+        print_error "Apache configuration has errors!"
+        apache2ctl configtest
+        print_warning "Apache NOT restarted - fix errors first"
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    print_success "Apache hardening complete"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    
+    press_enter
+}
+
+#############################################
+# Task 17: LAMP Stack - MySQL Hardening
+#############################################
+
+harden_mysql() {
+    print_header "MYSQL/MARIADB DATABASE HARDENING"
+    print_info "Comprehensive MySQL security hardening for LAMP stack"
+    echo ""
+    
+    # Check if MySQL/MariaDB is installed
+    local has_mysql=false
+    local has_mariadb=false
+    local mysql_conf=""
+    
+    if command -v mysql &>/dev/null || systemctl list-unit-files mysql.service &>/dev/null 2>&1; then
+        has_mysql=true
+        mysql_conf="/etc/mysql/mysql.conf.d/mysqld.cnf"
+        [[ ! -f "$mysql_conf" ]] && mysql_conf="/etc/mysql/my.cnf"
+    fi
+    
+    if command -v mariadb &>/dev/null || systemctl list-unit-files mariadb.service &>/dev/null 2>&1; then
+        has_mariadb=true
+        mysql_conf="/etc/mysql/mariadb.conf.d/50-server.cnf"
+        [[ ! -f "$mysql_conf" ]] && mysql_conf="/etc/mysql/my.cnf"
+    fi
+    
+    if [[ "$has_mysql" == false && "$has_mariadb" == false ]]; then
+        print_warning "MySQL/MariaDB is not installed on this system"
+        press_enter
+        return
+    fi
+    
+    local changes_made=false
+    local db_type="MySQL"
+    [[ "$has_mariadb" == true ]] && db_type="MariaDB"
+    
+    print_info "Detected: $db_type"
+    echo ""
+    
+    if ! confirm_action "Apply $db_type security hardening?"; then
+        print_info "Skipping MySQL hardening"
+        press_enter
+        return
+    fi
+    
+    # Backup config
+    [[ -f "$mysql_conf" ]] && cp "$mysql_conf" "${mysql_conf}.bak.$(date +%Y%m%d_%H%M%S)"
+    
+    echo -e "\n${BOLD}═══ SAFE OPERATIONS (Auto-applying) ═══${NC}"
+    
+    if [[ -f "$mysql_conf" ]]; then
+        # === SAFE: bind-address localhost (OrangeHRM is local only per README) ===
+        if grep -q "^bind-address" "$mysql_conf"; then
+            sed -i 's/^bind-address.*/bind-address = 127.0.0.1/' "$mysql_conf"
+        elif grep -q "^#bind-address" "$mysql_conf"; then
+            sed -i 's/^#bind-address.*/bind-address = 127.0.0.1/' "$mysql_conf"
+        else
+            echo "bind-address = 127.0.0.1" >> "$mysql_conf"
+        fi
+        print_success "Bound to localhost only (127.0.0.1)"
+        
+        # === SAFE: Disable local-infile ===
+        if ! grep -q "^local-infile" "$mysql_conf"; then
+            echo "local-infile = 0" >> "$mysql_conf"
+        fi
+        print_success "Disabled LOCAL INFILE (SQL injection vector)"
+        
+        # === SAFE: Disable symbolic-links ===
+        if ! grep -q "^symbolic-links" "$mysql_conf"; then
+            echo "symbolic-links = 0" >> "$mysql_conf"
+        fi
+        print_success "Disabled symbolic links"
+        
+        # === SAFE: secure-file-priv (obscure - often missed) ===
+        if ! grep -q "^secure-file-priv" "$mysql_conf"; then
+            echo "secure-file-priv = /var/lib/mysql-files" >> "$mysql_conf"
+        fi
+        print_success "Restricted file operations to /var/lib/mysql-files"
+        
+        # === SAFE: skip-show-database ===
+        if ! grep -q "^skip-show-database" "$mysql_conf"; then
+            echo "skip-show-database" >> "$mysql_conf"
+        fi
+        print_success "Hidden database list from non-admins"
+        
+        # === SAFE: Error logging ===
+        if ! grep -q "^log-error" "$mysql_conf"; then
+            echo "log-error = /var/log/mysql/error.log" >> "$mysql_conf"
+        fi
+        print_success "Error logging enabled"
+        
+        # === SAFE: Slow query log (obscure - security monitoring) ===
+        if ! grep -q "^slow_query_log" "$mysql_conf"; then
+            echo "slow_query_log = 1" >> "$mysql_conf"
+            echo "slow_query_log_file = /var/log/mysql/slow.log" >> "$mysql_conf"
+            echo "long_query_time = 2" >> "$mysql_conf"
+        fi
+        print_success "Slow query logging enabled"
+        
+        # === SAFE: Connection limits ===
+        if ! grep -q "^max_connections" "$mysql_conf"; then
+            echo "max_connections = 100" >> "$mysql_conf"
+        fi
+        print_success "Max connections limited to 100"
+        
+        # === SAFE: max_connect_errors ===
+        if ! grep -q "^max_connect_errors" "$mysql_conf"; then
+            echo "max_connect_errors = 10" >> "$mysql_conf"
+        fi
+        print_success "Max connection errors set to 10"
+        
+        # === SAFE: Connection timeouts ===
+        if ! grep -q "^connect_timeout" "$mysql_conf"; then
+            echo "connect_timeout = 10" >> "$mysql_conf"
+            echo "wait_timeout = 600" >> "$mysql_conf"
+            echo "interactive_timeout = 600" >> "$mysql_conf"
+            echo "net_read_timeout = 30" >> "$mysql_conf"
+            echo "net_write_timeout = 30" >> "$mysql_conf"
+        fi
+        print_success "Connection timeouts configured"
+        
+        changes_made=true
+    fi
+    
+    echo -e "\n${BOLD}═══ CAUTION OPERATIONS ═══${NC}"
+    
+    # === CAUTION: Strict SQL mode (may break poorly written apps) ===
+    if [[ -f "$mysql_conf" ]]; then
+        if ! grep -q "^sql-mode" "$mysql_conf"; then
+            if confirm_action "Enable strict SQL mode? (May break poorly written queries)"; then
+                echo "sql-mode = STRICT_ALL_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION,NO_ZERO_DATE,NO_ZERO_IN_DATE" >> "$mysql_conf"
+                print_success "Strict SQL mode enabled"
+            fi
+        fi
+    fi
+    
+    echo -e "\n${BOLD}═══ DATABASE CLEANUP ═══${NC}"
+    
+    # Check if we can connect to MySQL
+    if mysql -e "SELECT 1" &>/dev/null 2>&1; then
+        print_success "Connected to $db_type"
+        
+        # === Check for anonymous users ===
+        local anon_count=$(mysql -N -e "SELECT COUNT(*) FROM mysql.user WHERE User='';" 2>/dev/null)
+        if [[ "$anon_count" -gt 0 ]]; then
+            print_warning "Found $anon_count anonymous user(s)"
+            if confirm_action "Remove anonymous users?"; then
+                mysql -e "DELETE FROM mysql.user WHERE User='';"
+                mysql -e "FLUSH PRIVILEGES;"
+                print_success "Removed anonymous users"
+            fi
+        else
+            print_success "No anonymous users found"
+        fi
+        
+        # === Check for remote root ===
+        local remote_root=$(mysql -N -e "SELECT COUNT(*) FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" 2>/dev/null)
+        if [[ "$remote_root" -gt 0 ]]; then
+            print_warning "Found $remote_root remote root account(s)"
+            if confirm_action "Remove remote root access?"; then
+                mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+                mysql -e "FLUSH PRIVILEGES;"
+                print_success "Removed remote root access"
+            fi
+        else
+            print_success "No remote root access found"
+        fi
+        
+        # === Check for test database ===
+        local test_db=$(mysql -N -e "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='test';" 2>/dev/null)
+        if [[ "$test_db" -gt 0 ]]; then
+            print_warning "Test database exists"
+            if confirm_action "Drop test database?"; then
+                mysql -e "DROP DATABASE IF EXISTS test;"
+                mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+                mysql -e "FLUSH PRIVILEGES;"
+                print_success "Dropped test database"
+            fi
+        else
+            print_success "No test database found"
+        fi
+        
+        # === Check for users with % host (obscure) ===
+        echo -e "\n${BOLD}Checking for wildcard host users...${NC}"
+        local wildcard_users=$(mysql -N -e "SELECT CONCAT(User,'@',Host) FROM mysql.user WHERE Host='%';" 2>/dev/null)
+        if [[ -n "$wildcard_users" ]]; then
+            print_warning "Found users with wildcard (%) host access:"
+            echo "$wildcard_users" | while read user; do
+                echo -e "  ${YELLOW}!${NC} $user"
+            done
+            print_info "Review these manually - they can connect from anywhere"
+        else
+            print_success "No wildcard host users found"
+        fi
+        
+        # === Check for users with excessive privileges (obscure) ===
+        echo -e "\n${BOLD}Checking for excessive privileges...${NC}"
+        local priv_users=$(mysql -N -e "SELECT CONCAT(User,'@',Host) FROM mysql.user WHERE (Super_priv='Y' OR File_priv='Y' OR Process_priv='Y') AND User != 'root' AND User != 'mysql.sys' AND User != 'debian-sys-maint';" 2>/dev/null)
+        if [[ -n "$priv_users" ]]; then
+            print_warning "Found non-root users with elevated privileges:"
+            echo "$priv_users" | while read user; do
+                echo -e "  ${YELLOW}!${NC} $user"
+            done
+            print_info "Consider revoking SUPER, FILE, PROCESS privileges"
+        else
+            print_success "No excessive privileges found"
+        fi
+        
+    else
+        print_warning "Cannot connect to $db_type - skipping database cleanup"
+        print_info "Run 'sudo mysql_secure_installation' manually"
+    fi
+    
+    # Restart service
+    echo -e "\n${BOLD}Restarting $db_type...${NC}"
+    if [[ "$has_mysql" == true ]]; then
+        systemctl restart mysql && print_success "MySQL restarted"
+    elif [[ "$has_mariadb" == true ]]; then
+        systemctl restart mariadb && print_success "MariaDB restarted"
+    fi
+    
+    # === Suggest mysql_secure_installation ===
+    echo -e "\n${BOLD}═══ MANUAL STEP ═══${NC}"
+    print_warning "Recommended: Run 'sudo mysql_secure_installation' for additional hardening"
+    if confirm_action "Run mysql_secure_installation now?"; then
+        mysql_secure_installation
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    print_success "$db_type hardening complete"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    
+    press_enter
+}
+
+#############################################
+# Task 18: LAMP Stack - PHP Hardening
+#############################################
+
+harden_php() {
+    print_header "PHP CONFIGURATION HARDENING"
+    print_info "Comprehensive PHP security hardening for LAMP stack"
+    echo ""
+    
+    # Find PHP installations
+    local php_versions=()
+    for dir in /etc/php/*/; do
+        if [[ -d "$dir" ]]; then
+            local ver=$(basename "$dir")
+            php_versions+=("$ver")
+        fi
+    done
+    
+    if [[ ${#php_versions[@]} -eq 0 ]]; then
+        print_warning "No PHP installations found in /etc/php/"
+        press_enter
+        return
+    fi
+    
+    print_info "Found PHP version(s): ${php_versions[*]}"
+    echo ""
+    
+    if ! confirm_action "Apply PHP security hardening?"; then
+        print_info "Skipping PHP hardening"
+        press_enter
+        return
+    fi
+    
+    local changes_made=false
+    
+    for ver in "${php_versions[@]}"; do
+        echo -e "\n${BOLD}════════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}Hardening PHP $ver${NC}"
+        echo -e "${BOLD}════════════════════════════════════════════════════════════${NC}"
+        
+        # Find php.ini files for this version
+        local php_ini_files=(
+            "/etc/php/$ver/apache2/php.ini"
+            "/etc/php/$ver/fpm/php.ini"
+            "/etc/php/$ver/cli/php.ini"
+        )
+        
+        for php_ini in "${php_ini_files[@]}"; do
+            if [[ -f "$php_ini" ]]; then
+                echo -e "\n${CYAN}Configuring: $php_ini${NC}"
+                cp "$php_ini" "${php_ini}.bak.$(date +%Y%m%d_%H%M%S)"
+                
+                echo -e "\n${BOLD}═══ SAFE OPERATIONS (Auto-applying) ═══${NC}"
+                
+                # === SAFE: expose_php (hide version) ===
+                sed -i 's/^expose_php.*/expose_php = Off/' "$php_ini"
+                print_success "expose_php = Off (hide PHP version)"
+                
+                # === SAFE: display_errors (never show to users) ===
+                sed -i 's/^display_errors.*/display_errors = Off/' "$php_ini"
+                print_success "display_errors = Off"
+                
+                # === SAFE: display_startup_errors ===
+                sed -i 's/^display_startup_errors.*/display_startup_errors = Off/' "$php_ini"
+                print_success "display_startup_errors = Off"
+                
+                # === SAFE: log_errors ===
+                sed -i 's/^log_errors.*/log_errors = On/' "$php_ini"
+                print_success "log_errors = On"
+                
+                # === SAFE: html_errors ===
+                sed -i 's/^html_errors.*/html_errors = Off/' "$php_ini"
+                print_success "html_errors = Off"
+                
+                # === SAFE: error_log ===
+                if ! grep -q "^error_log = /var/log/php" "$php_ini"; then
+                    sed -i 's|^;error_log = syslog|error_log = /var/log/php_errors.log|' "$php_ini"
+                fi
+                print_success "error_log configured"
+                
+                # === SAFE: allow_url_include (RFI protection) ===
+                sed -i 's/^allow_url_include.*/allow_url_include = Off/' "$php_ini"
+                print_success "allow_url_include = Off (RFI protection)"
+                
+                # === SAFE: session security ===
+                sed -i 's/^session.cookie_httponly.*/session.cookie_httponly = 1/' "$php_ini"
+                sed -i 's/^;session.cookie_httponly.*/session.cookie_httponly = 1/' "$php_ini"
+                print_success "session.cookie_httponly = 1"
+                
+                sed -i 's/^session.use_strict_mode.*/session.use_strict_mode = 1/' "$php_ini"
+                sed -i 's/^;session.use_strict_mode.*/session.use_strict_mode = 1/' "$php_ini"
+                print_success "session.use_strict_mode = 1 (session fixation protection)"
+                
+                sed -i 's/^session.use_only_cookies.*/session.use_only_cookies = 1/' "$php_ini"
+                print_success "session.use_only_cookies = 1"
+                
+                # === SAFE: session.cookie_samesite (obscure - CSRF protection) ===
+                if grep -q "^session.cookie_samesite" "$php_ini"; then
+                    sed -i 's/^session.cookie_samesite.*/session.cookie_samesite = Lax/' "$php_ini"
+                elif grep -q "^;session.cookie_samesite" "$php_ini"; then
+                    sed -i 's/^;session.cookie_samesite.*/session.cookie_samesite = Lax/' "$php_ini"
+                else
+                    echo "session.cookie_samesite = Lax" >> "$php_ini"
+                fi
+                print_success "session.cookie_samesite = Lax (CSRF protection)"
+                
+                # === SAFE: cgi.fix_pathinfo (obscure - path traversal) ===
+                sed -i 's/^cgi.fix_pathinfo.*/cgi.fix_pathinfo = 0/' "$php_ini"
+                sed -i 's/^;cgi.fix_pathinfo.*/cgi.fix_pathinfo = 0/' "$php_ini"
+                print_success "cgi.fix_pathinfo = 0 (path traversal protection)"
+                
+                # === SAFE: mail.add_x_header (obscure - info leak) ===
+                sed -i 's/^mail.add_x_header.*/mail.add_x_header = Off/' "$php_ini"
+                sed -i 's/^;mail.add_x_header.*/mail.add_x_header = Off/' "$php_ini"
+                print_success "mail.add_x_header = Off (hide mail source)"
+                
+                # === SAFE: Resource limits ===
+                sed -i 's/^max_execution_time.*/max_execution_time = 30/' "$php_ini"
+                sed -i 's/^max_input_time.*/max_input_time = 60/' "$php_ini"
+                sed -i 's/^memory_limit.*/memory_limit = 128M/' "$php_ini"
+                sed -i 's/^upload_max_filesize.*/upload_max_filesize = 10M/' "$php_ini"
+                sed -i 's/^post_max_size.*/post_max_size = 10M/' "$php_ini"
+                sed -i 's/^max_input_vars.*/max_input_vars = 1000/' "$php_ini"
+                print_success "Resource limits configured"
+                
+                # === SAFE: enable_dl (obscure) ===
+                sed -i 's/^enable_dl.*/enable_dl = Off/' "$php_ini"
+                sed -i 's/^;enable_dl.*/enable_dl = Off/' "$php_ini"
+                print_success "enable_dl = Off (disable dynamic loading)"
+                
+                # === SAFE: assert.active (obscure - disable assert) ===
+                if grep -q "^assert.active" "$php_ini"; then
+                    sed -i 's/^assert.active.*/assert.active = 0/' "$php_ini"
+                elif grep -q "^;assert.active" "$php_ini"; then
+                    sed -i 's/^;assert.active.*/assert.active = 0/' "$php_ini"
+                else
+                    echo "assert.active = 0" >> "$php_ini"
+                fi
+                print_success "assert.active = 0"
+                
+                changes_made=true
+            fi
+        done
+    done
+    
+    echo -e "\n${BOLD}═══ CAUTION OPERATIONS ═══${NC}"
+    
+    # === CAUTION: allow_url_fopen (breaks some plugins) ===
+    print_warning "allow_url_fopen = Off would break plugins that fetch remote files"
+    print_info "Skipping allow_url_fopen change (OrangeHRM may need it)"
+    
+    # === CAUTION: open_basedir (may break includes) ===
+    print_warning "open_basedir restriction skipped (may break OrangeHRM)"
+    
+    # === CAUTION: disable_functions ===
+    print_warning "disable_functions skipped (may break OrangeHRM functionality)"
+    print_info "Manual review: Consider disabling: exec,passthru,shell_exec,system,proc_open,popen"
+    
+    echo -e "\n${BOLD}═══ SKIPPED (Could break OrangeHRM) ═══${NC}"
+    print_info "Skipped: disable_functions (could break app)"
+    print_info "Skipped: open_basedir (could break includes)"
+    print_info "Skipped: allow_url_fopen = Off (could break updates)"
+    print_info "Skipped: session.cookie_secure (no HTTPS per README)"
+    
+    # Restart Apache/PHP-FPM
+    echo -e "\n${BOLD}Restarting services...${NC}"
+    if systemctl is-active apache2 &>/dev/null; then
+        systemctl restart apache2 && print_success "Apache restarted"
+    fi
+    for ver in "${php_versions[@]}"; do
+        if systemctl is-active "php$ver-fpm" &>/dev/null 2>&1; then
+            systemctl restart "php$ver-fpm" && print_success "PHP-FPM $ver restarted"
+        fi
+    done
+    
+    # Summary
+    echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    print_success "PHP hardening complete"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    
+    press_enter
+}
+
+#############################################
+# Task 19: Kernel Debug & SysRq Hardening
+#############################################
+
+harden_kernel_debug() {
+    print_header "KERNEL DEBUG & SYSRQ HARDENING"
+    print_info "Disabling kernel debugging features as requested by management"
+    echo ""
+    
+    local sysctl_conf="/etc/sysctl.d/99-kernel-hardening.conf"
+    local modprobe_conf="/etc/modprobe.d/hardening-blacklist.conf"
+    local changes_made=false
+    
+    if ! confirm_action "Apply kernel debugging restrictions?"; then
+        print_info "Skipping kernel hardening"
+        press_enter
+        return
+    fi
+    
+    echo -e "\n${BOLD}═══ SAFE OPERATIONS (Auto-applying) ═══${NC}"
+    
+    # Create/update sysctl config
+    cat > "$sysctl_conf" << 'EOF'
+# CyberPatriot Kernel Hardening - Debug & SysRq Restrictions
+# Management requested: Disable kernel system request debugging
+
+# === CRITICAL: Disable Magic SysRq Key ===
+# This is explicitly requested in the README
+kernel.sysrq = 0
+
+# === Restrict Kernel Information Disclosure ===
+# Restrict dmesg to root only
+kernel.dmesg_restrict = 1
+
+# Hide kernel pointers from all users
+kernel.kptr_restrict = 2
+
+# Reduce console message verbosity
+kernel.printk = 3 3 3 3
+
+# === Performance/Debug Restrictions ===
+# Restrict perf_events (obscure - often missed)
+kernel.perf_event_paranoid = 3
+
+# Disable unprivileged BPF (obscure)
+kernel.unprivileged_bpf_disabled = 1
+
+# Harden BPF JIT (obscure)
+net.core.bpf_jit_harden = 2
+
+# Disable kexec (prevents kernel memory dumping)
+kernel.kexec_load_disabled = 1
+
+# Disable unprivileged user namespaces (container escape prevention)
+kernel.unprivileged_userns_clone = 0
+
+# Disable userfaultfd for unprivileged users (obscure)
+vm.unprivileged_userfaultfd = 0
+
+# Prevent TTY line discipline auto-loading (obscure)
+dev.tty.ldisc_autoload = 0
+
+# === Crash Behavior ===
+# Panic on oops (prevent exploitation of kernel bugs)
+kernel.panic_on_oops = 1
+
+# Auto-reboot after kernel panic
+kernel.panic = 10
+
+# === Ptrace Restrictions ===
+# Restrict ptrace (debugging)
+kernel.yama.ptrace_scope = 1
+
+# === Memory Protection ===
+# Full ASLR
+kernel.randomize_va_space = 2
+
+# Null pointer dereference protection
+vm.mmap_min_addr = 65536
+
+# No core dumps for SUID
+fs.suid_dumpable = 0
+
+# === Symlink/Hardlink Protection ===
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+fs.protected_fifos = 2
+fs.protected_regular = 2
+EOF
+    
+    print_success "Created kernel hardening sysctl config"
+    print_success "kernel.sysrq = 0 (DISABLED as requested)"
+    print_success "kernel.dmesg_restrict = 1"
+    print_success "kernel.kptr_restrict = 2"
+    print_success "kernel.perf_event_paranoid = 3"
+    print_success "kernel.unprivileged_bpf_disabled = 1"
+    print_success "kernel.kexec_load_disabled = 1"
+    print_success "net.core.bpf_jit_harden = 2"
+    print_success "vm.unprivileged_userfaultfd = 0"
+    print_success "dev.tty.ldisc_autoload = 0"
+    
+    # Apply sysctl settings
+    echo -e "\n${BOLD}Applying kernel parameters...${NC}"
+    sysctl -p "$sysctl_conf" 2>&1 | grep -v "^$" || true
+    print_success "Kernel parameters applied"
+    
+    changes_made=true
+    
+    echo -e "\n${BOLD}═══ MODULE BLACKLISTING ═══${NC}"
+    
+    if confirm_action "Blacklist unused/dangerous kernel modules?"; then
+        cat > "$modprobe_conf" << 'EOF'
+# CyberPatriot Kernel Module Blacklist
+
+# Unused filesystem modules
+install cramfs /bin/true
+install freevxfs /bin/true
+install jffs2 /bin/true
+install hfs /bin/true
+install hfsplus /bin/true
+install udf /bin/true
+
+# Unused network protocols
+install dccp /bin/true
+install sctp /bin/true
+install rds /bin/true
+install tipc /bin/true
+
+# Firewire (potential DMA attack vector)
+install firewire-core /bin/true
+install firewire-ohci /bin/true
+
+# Uncomment if Bluetooth not needed:
+# install bluetooth /bin/true
+
+# Uncomment if USB storage not needed:
+# install usb-storage /bin/true
+EOF
+        
+        print_success "Created module blacklist"
+        print_success "Blacklisted: cramfs, freevxfs, jffs2, hfs, hfsplus, udf"
+        print_success "Blacklisted: dccp, sctp, rds, tipc protocols"
+        print_success "Blacklisted: firewire modules"
+        
+        # Update initramfs
+        if confirm_action "Update initramfs to apply module blacklist?"; then
+            update-initramfs -u 2>/dev/null && print_success "initramfs updated"
+        fi
+    fi
+    
+    echo -e "\n${BOLD}═══ VERIFICATION ═══${NC}"
+    
+    # Verify SysRq is disabled
+    local sysrq_val=$(cat /proc/sys/kernel/sysrq 2>/dev/null)
+    if [[ "$sysrq_val" == "0" ]]; then
+        echo -e "${GREEN}✓${NC} kernel.sysrq = 0 (DISABLED)"
+    else
+        echo -e "${YELLOW}!${NC} kernel.sysrq = $sysrq_val (should be 0, will apply on reboot)"
+    fi
+    
+    local dmesg_val=$(cat /proc/sys/kernel/dmesg_restrict 2>/dev/null)
+    if [[ "$dmesg_val" == "1" ]]; then
+        echo -e "${GREEN}✓${NC} kernel.dmesg_restrict = 1"
+    else
+        echo -e "${YELLOW}!${NC} kernel.dmesg_restrict = $dmesg_val"
+    fi
+    
+    local kptr_val=$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null)
+    if [[ "$kptr_val" == "2" ]]; then
+        echo -e "${GREEN}✓${NC} kernel.kptr_restrict = 2"
+    else
+        echo -e "${YELLOW}!${NC} kernel.kptr_restrict = $kptr_val"
+    fi
+    
+    echo -e "\n${BOLD}═══ SKIPPED (Could cause issues) ═══${NC}"
+    print_info "Skipped: kernel.modules_disabled=1 (prevents ALL module loading)"
+    print_info "Skipped: bluetooth blacklist (may be needed)"
+    print_info "Skipped: usb-storage blacklist (may be needed)"
+    
+    # Summary
+    echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    print_success "Kernel debug hardening complete"
+    print_warning "Some settings require reboot to fully apply"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    
+    press_enter
+}
+
+#############################################
+# Task 20: OrangeHRM Application Hardening
+#############################################
+
+harden_orangehrm() {
+    print_header "ORANGEHRM APPLICATION HARDENING"
+    print_info "Security hardening for OrangeHRM HRM system"
+    echo ""
+    
+    # Find OrangeHRM installation
+    local orangehrm_paths=(
+        "/var/www/html/orangehrm"
+        "/var/www/orangehrm"
+        "/var/www/html"
+    )
+    
+    local orangehrm_path=""
+    for path in "${orangehrm_paths[@]}"; do
+        if [[ -d "$path" ]] && [[ -f "$path/lib/confs/Conf.php" || -f "$path/symfony/config/databases.yml" ]]; then
+            orangehrm_path="$path"
+            break
+        fi
+    done
+    
+    if [[ -z "$orangehrm_path" ]]; then
+        print_warning "OrangeHRM installation not found in standard locations"
+        echo -e "${CYAN}Searched:${NC}"
+        for path in "${orangehrm_paths[@]}"; do
+            echo "  - $path"
+        done
+        
+        echo -e -n "${CYAN}Enter OrangeHRM path (or 'skip'): ${NC}"
+        read -r custom_path
+        
+        if [[ "$custom_path" == "skip" || -z "$custom_path" ]]; then
+            print_info "Skipping OrangeHRM hardening"
+            press_enter
+            return
+        fi
+        
+        orangehrm_path="$custom_path"
+    fi
+    
+    print_success "Found OrangeHRM at: $orangehrm_path"
+    echo ""
+    
+    if ! confirm_action "Apply OrangeHRM security hardening?"; then
+        print_info "Skipping OrangeHRM hardening"
+        press_enter
+        return
+    fi
+    
+    local changes_made=false
+    
+    echo -e "\n${BOLD}═══ SAFE OPERATIONS (Auto-applying) ═══${NC}"
+    
+    # === SAFE: Remove installer directory ===
+    if [[ -d "$orangehrm_path/installer" ]]; then
+        print_warning "Installer directory found - security risk!"
+        if confirm_action "Remove installer directory?"; then
+            rm -rf "$orangehrm_path/installer"
+            print_success "Removed installer directory"
+            changes_made=true
+        fi
+    else
+        print_success "Installer directory already removed"
+    fi
+    
+    # === SAFE: Remove info disclosure files ===
+    local info_files=("CHANGELOG.txt" "README.txt" "LICENSE.txt" "INSTALL.txt" "UPGRADE.txt" "readme.md" "README.md")
+    for file in "${info_files[@]}"; do
+        if [[ -f "$orangehrm_path/$file" ]]; then
+            rm -f "$orangehrm_path/$file"
+            print_success "Removed $file (info disclosure)"
+            changes_made=true
+        fi
+    done
+    
+    # === SAFE: Secure configuration files ===
+    if [[ -f "$orangehrm_path/lib/confs/Conf.php" ]]; then
+        chmod 640 "$orangehrm_path/lib/confs/Conf.php"
+        chown www-data:www-data "$orangehrm_path/lib/confs/Conf.php"
+        print_success "Secured Conf.php permissions (640)"
+    fi
+    
+    if [[ -f "$orangehrm_path/symfony/config/databases.yml" ]]; then
+        chmod 640 "$orangehrm_path/symfony/config/databases.yml"
+        chown www-data:www-data "$orangehrm_path/symfony/config/databases.yml"
+        print_success "Secured databases.yml permissions (640)"
+    fi
+    
+    # === SAFE: Secure uploads directory ===
+    if [[ -d "$orangehrm_path/uploads" ]]; then
+        chmod 750 "$orangehrm_path/uploads"
+        chown -R www-data:www-data "$orangehrm_path/uploads"
+        print_success "Secured uploads directory (750)"
+        
+        # Prevent PHP execution in uploads
+        cat > "$orangehrm_path/uploads/.htaccess" << 'EOF'
+# Prevent PHP execution in uploads
+php_flag engine off
+<FilesMatch "\.php$">
+    Require all denied
+</FilesMatch>
+EOF
+        print_success "Disabled PHP execution in uploads directory"
+        changes_made=true
+    fi
+    
+    # === SAFE: Create .htaccess to protect sensitive directories ===
+    local protect_dirs=("lib/confs" "symfony/config" "symfony/log" "symfony/cache")
+    for dir in "${protect_dirs[@]}"; do
+        if [[ -d "$orangehrm_path/$dir" ]]; then
+            cat > "$orangehrm_path/$dir/.htaccess" << 'EOF'
+# Deny all access to this directory
+Require all denied
+EOF
+            print_success "Protected $dir from web access"
+            changes_made=true
+        fi
+    done
+    
+    # === SAFE: Secure log directory ===
+    if [[ -d "$orangehrm_path/symfony/log" ]]; then
+        chmod 750 "$orangehrm_path/symfony/log"
+        find "$orangehrm_path/symfony/log" -type f -exec chmod 640 {} \;
+        print_success "Secured symfony/log directory"
+    fi
+    
+    # === SAFE: Search for phpinfo files ===
+    echo -e "\n${BOLD}Scanning for phpinfo() files...${NC}"
+    local phpinfo_files=$(find "$orangehrm_path" -name "*phpinfo*" -o -name "*info.php*" 2>/dev/null)
+    if [[ -n "$phpinfo_files" ]]; then
+        print_warning "Found potential phpinfo files:"
+        echo "$phpinfo_files" | while read file; do
+            echo -e "  ${YELLOW}!${NC} $file"
+        done
+        if confirm_action "Remove phpinfo files?"; then
+            echo "$phpinfo_files" | while read file; do
+                rm -f "$file" && print_success "Removed $file"
+            done
+            changes_made=true
+        fi
+    else
+        print_success "No phpinfo files found"
+    fi
+    
+    # === SAFE: Search for backup files ===
+    echo -e "\n${BOLD}Scanning for backup files in webroot...${NC}"
+    local backup_files=$(find "$orangehrm_path" \( -name "*.bak" -o -name "*.old" -o -name "*.orig" -o -name "*~" -o -name "*.swp" -o -name "*.sql" \) 2>/dev/null | head -20)
+    if [[ -n "$backup_files" ]]; then
+        print_warning "Found backup/temp files (info disclosure risk):"
+        echo "$backup_files" | while read file; do
+            echo -e "  ${YELLOW}!${NC} $file"
+        done
+        if confirm_action "Remove backup files?"; then
+            echo "$backup_files" | while read file; do
+                rm -f "$file"
+            done
+            print_success "Removed backup files"
+            changes_made=true
+        fi
+    else
+        print_success "No backup files found"
+    fi
+    
+    # === SAFE: Check for .git/.svn ===
+    echo -e "\n${BOLD}Scanning for version control directories...${NC}"
+    local vcs_dirs=$(find "$orangehrm_path" \( -name ".git" -o -name ".svn" -o -name ".hg" \) -type d 2>/dev/null)
+    if [[ -n "$vcs_dirs" ]]; then
+        print_warning "Found version control directories (security risk):"
+        echo "$vcs_dirs" | while read dir; do
+            echo -e "  ${YELLOW}!${NC} $dir"
+        done
+        if confirm_action "Remove version control directories?"; then
+            echo "$vcs_dirs" | while read dir; do
+                rm -rf "$dir"
+            done
+            print_success "Removed version control directories"
+            changes_made=true
+        fi
+    else
+        print_success "No version control directories found"
+    fi
+    
+    # === SAFE: Check for .env files ===
+    local env_files=$(find "$orangehrm_path" -name ".env*" 2>/dev/null)
+    if [[ -n "$env_files" ]]; then
+        print_warning "Found .env files:"
+        echo "$env_files" | while read file; do
+            echo -e "  ${YELLOW}!${NC} $file"
+            chmod 600 "$file"
+        done
+        print_success "Secured .env file permissions (600)"
+        changes_made=true
+    fi
+    
+    echo -e "\n${BOLD}═══ MANUAL STEPS REQUIRED ═══${NC}"
+    
+    print_warning "The following must be done manually via OrangeHRM web interface:"
+    echo -e "${CYAN}1.${NC} Change default admin password (Admin/admin or Admin/Admin123)"
+    echo -e "${CYAN}2.${NC} Review and configure password policy in Admin > Configuration"
+    echo -e "${CYAN}3.${NC} Enable account lockout after failed login attempts"
+    echo -e "${CYAN}4.${NC} Review user accounts and permissions"
+    echo -e "${CYAN}5.${NC} Disable debug mode if enabled in configuration"
+    echo ""
+    
+    # === Check if Conf.php has debug enabled ===
+    if [[ -f "$orangehrm_path/lib/confs/Conf.php" ]]; then
+        if grep -q "DEBUG.*true\|debug.*true" "$orangehrm_path/lib/confs/Conf.php" 2>/dev/null; then
+            print_warning "DEBUG may be enabled in Conf.php - review and disable"
+        fi
+    fi
+    
+    # Summary
+    echo -e "\n${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    if [[ "$changes_made" == true ]]; then
+        print_success "OrangeHRM hardening complete"
+    else
+        print_info "No changes made"
+    fi
+    print_warning "Remember to check default admin credentials!"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    
+    press_enter
+}
+
+#############################################
+# Task 21: LAMP Info Leak Audit
+#############################################
+
+lamp_info_leak_audit() {
+    print_header "LAMP STACK INFORMATION DISCLOSURE AUDIT"
+    print_info "Scanning for information leaks across Apache, MySQL, PHP"
+    echo ""
+    
+    local issues_found=0
+    
+    echo -e "${BOLD}═══ APACHE INFORMATION LEAKS ═══${NC}"
+    
+    # Check /server-status
+    echo -e "\n${CYAN}Checking /server-status accessibility...${NC}"
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost/server-status 2>/dev/null | grep -q "200\|403"; then
+        local status_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/server-status 2>/dev/null)
+        if [[ "$status_code" == "200" ]]; then
+            print_warning "/server-status is ACCESSIBLE (info leak!)"
+            ((issues_found++))
+        else
+            print_success "/server-status is protected (403)"
+        fi
+    else
+        print_success "/server-status not accessible"
+    fi
+    
+    # Check /server-info
+    echo -e "${CYAN}Checking /server-info accessibility...${NC}"
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost/server-info 2>/dev/null | grep -q "200"; then
+        print_warning "/server-info is ACCESSIBLE (info leak!)"
+        ((issues_found++))
+    else
+        print_success "/server-info not accessible"
+    fi
+    
+    # Check Server header
+    echo -e "${CYAN}Checking Server header...${NC}"
+    local server_header=$(curl -sI http://localhost 2>/dev/null | grep -i "^Server:" | head -1)
+    if [[ -n "$server_header" ]]; then
+        if echo "$server_header" | grep -qi "Apache/[0-9]"; then
+            print_warning "Server header reveals version: $server_header"
+            ((issues_found++))
+        else
+            print_success "Server header minimized: $server_header"
+        fi
+    fi
+    
+    # Check X-Powered-By header
+    echo -e "${CYAN}Checking X-Powered-By header...${NC}"
+    local powered_header=$(curl -sI http://localhost 2>/dev/null | grep -i "^X-Powered-By:" | head -1)
+    if [[ -n "$powered_header" ]]; then
+        print_warning "X-Powered-By header present: $powered_header"
+        ((issues_found++))
+    else
+        print_success "X-Powered-By header not present"
+    fi
+    
+    echo -e "\n${BOLD}═══ PHP INFORMATION LEAKS ═══${NC}"
+    
+    # Search for phpinfo files
+    echo -e "${CYAN}Searching for phpinfo files...${NC}"
+    local phpinfo_count=$(find /var/www -name "*phpinfo*" -o -name "*info.php*" 2>/dev/null | wc -l)
+    if [[ $phpinfo_count -gt 0 ]]; then
+        print_warning "Found $phpinfo_count potential phpinfo file(s)"
+        find /var/www -name "*phpinfo*" -o -name "*info.php*" 2>/dev/null | while read f; do
+            echo -e "  ${YELLOW}!${NC} $f"
+        done
+        ((issues_found++))
+    else
+        print_success "No phpinfo files found"
+    fi
+    
+    # Check PHP version in headers
+    echo -e "${CYAN}Checking PHP version disclosure...${NC}"
+    for php_ini in /etc/php/*/apache2/php.ini; do
+        if [[ -f "$php_ini" ]]; then
+            if grep -q "^expose_php = On" "$php_ini"; then
+                print_warning "PHP version exposed in $php_ini"
+                ((issues_found++))
+            fi
+        fi
+    done
+    
+    echo -e "\n${BOLD}═══ FILE DISCLOSURE RISKS ═══${NC}"
+    
+    # Search for backup files
+    echo -e "${CYAN}Searching for backup files in webroot...${NC}"
+    local backup_count=$(find /var/www \( -name "*.bak" -o -name "*.old" -o -name "*.orig" -o -name "*~" -o -name "*.swp" -o -name "*.sql" \) 2>/dev/null | wc -l)
+    if [[ $backup_count -gt 0 ]]; then
+        print_warning "Found $backup_count backup/temp file(s)"
+        find /var/www \( -name "*.bak" -o -name "*.old" -o -name "*.orig" -o -name "*~" -o -name "*.swp" -o -name "*.sql" \) 2>/dev/null | head -10 | while read f; do
+            echo -e "  ${YELLOW}!${NC} $f"
+        done
+        ((issues_found++))
+    else
+        print_success "No backup files found in webroot"
+    fi
+    
+    # Search for .git/.svn directories
+    echo -e "${CYAN}Searching for version control directories...${NC}"
+    local vcs_count=$(find /var/www \( -name ".git" -o -name ".svn" -o -name ".hg" \) -type d 2>/dev/null | wc -l)
+    if [[ $vcs_count -gt 0 ]]; then
+        print_warning "Found $vcs_count version control directory(ies)"
+        find /var/www \( -name ".git" -o -name ".svn" -o -name ".hg" \) -type d 2>/dev/null | while read f; do
+            echo -e "  ${YELLOW}!${NC} $f"
+        done
+        ((issues_found++))
+    else
+        print_success "No version control directories in webroot"
+    fi
+    
+    # Search for .env files
+    echo -e "${CYAN}Searching for .env files...${NC}"
+    local env_count=$(find /var/www -name ".env*" 2>/dev/null | wc -l)
+    if [[ $env_count -gt 0 ]]; then
+        print_warning "Found $env_count .env file(s)"
+        find /var/www -name ".env*" 2>/dev/null | while read f; do
+            echo -e "  ${YELLOW}!${NC} $f"
+        done
+        ((issues_found++))
+    else
+        print_success "No .env files found"
+    fi
+    
+    # Search for config files
+    echo -e "${CYAN}Searching for exposed config files...${NC}"
+    local config_files=$(find /var/www \( -name "config.php" -o -name "database.php" -o -name "settings.php" -o -name "wp-config.php" \) 2>/dev/null)
+    if [[ -n "$config_files" ]]; then
+        print_info "Found configuration files (verify not web-accessible):"
+        echo "$config_files" | while read f; do
+            echo -e "  ${BLUE}>${NC} $f"
+        done
+    fi
+    
+    echo -e "\n${BOLD}═══ MYSQL INFORMATION LEAKS ═══${NC}"
+    
+    # Check if MySQL is accessible without password
+    echo -e "${CYAN}Checking MySQL anonymous access...${NC}"
+    if mysql -u "" -e "SELECT 1" &>/dev/null 2>&1; then
+        print_warning "MySQL allows anonymous access!"
+        ((issues_found++))
+    else
+        print_success "MySQL requires authentication"
+    fi
+    
+    echo -e "\n${BOLD}═══ AUDIT SUMMARY ═══${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    if [[ $issues_found -eq 0 ]]; then
+        echo -e "${GREEN}✓${NC} No information disclosure issues found"
+    else
+        echo -e "${YELLOW}!${NC} Found $issues_found potential information disclosure issue(s)"
+        echo ""
+        print_info "Run these modules to fix:"
+        echo -e "  - Option 16: Apache Hardening"
+        echo -e "  - Option 18: PHP Hardening"
+        echo -e "  - Option 20: OrangeHRM Hardening"
+    fi
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    press_enter
+}
+
+#############################################
+# Task 22: Manual Security Steps
+#############################################
+
+manual_security_steps() {
+    print_header "MANUAL SECURITY STEPS CHECKLIST"
+    print_info "Items that require manual intervention or web interface access"
+    echo ""
+    
+    echo -e "${BOLD}═══ ORANGEHRM WEB INTERFACE ═══${NC}"
+    echo -e "${CYAN}1.${NC} Login to OrangeHRM at http://localhost"
+    echo -e "${CYAN}2.${NC} Change default admin password (Admin/admin or Admin/Admin123)"
+    echo -e "${CYAN}3.${NC} Admin > Configuration > Password Policy - enable complexity"
+    echo -e "${CYAN}4.${NC} Admin > Configuration > Security - enable account lockout"
+    echo -e "${CYAN}5.${NC} Admin > User Management - review all users"
+    echo -e "${CYAN}6.${NC} Check for unauthorized admin accounts"
+    echo ""
+    
+    echo -e "${BOLD}═══ README-DEPENDENT ITEMS ═══${NC}"
+    echo -e "${CYAN}•${NC} Verify authorized users list matches README"
+    echo -e "${CYAN}•${NC} Verify authorized administrators list matches README"
+    echo -e "${CYAN}•${NC} Check if any specific services are required/prohibited"
+    echo -e "${CYAN}•${NC} Answer any forensic questions in README"
+    echo ""
+    
+    echo -e "${BOLD}═══ DATABASE REVIEW ═══${NC}"
+    echo -e "${CYAN}•${NC} Run: mysql -u root -p"
+    echo -e "${CYAN}•${NC} Check: SELECT User,Host FROM mysql.user;"
+    echo -e "${CYAN}•${NC} Look for: Anonymous users, remote root, weak passwords"
+    echo -e "${CYAN}•${NC} Review application database user privileges"
+    echo ""
+    
+    echo -e "${BOLD}═══ BROWSER DEFAULT ═══${NC}"
+    echo -e "${CYAN}•${NC} Per README: Chromium should be default browser"
+    echo -e "${CYAN}•${NC} Install: sudo apt install chromium-browser"
+    echo -e "${CYAN}•${NC} Set default: sudo update-alternatives --set x-www-browser /usr/bin/chromium-browser"
+    echo -e "${CYAN}•${NC} Or: xdg-settings set default-web-browser chromium-browser.desktop"
+    echo ""
+    
+    if confirm_action "Install and set Chromium as default browser now?"; then
+        apt install -y chromium-browser chromium
+        update-alternatives --set x-www-browser /usr/bin/chromium-browser 2>/dev/null || \
+        update-alternatives --set x-www-browser /usr/bin/chromium 2>/dev/null
+        print_success "Chromium installed and set as default"
+    fi
+    
+    echo -e "\n${BOLD}═══ FORENSIC QUESTIONS ═══${NC}"
+    echo -e "${CYAN}•${NC} Check user bash history: ~/.bash_history"
+    echo -e "${CYAN}•${NC} Check auth logs: /var/log/auth.log"
+    echo -e "${CYAN}•${NC} Check Apache logs: /var/log/apache2/access.log"
+    echo -e "${CYAN}•${NC} Check MySQL logs: /var/log/mysql/error.log"
+    echo -e "${CYAN}•${NC} Look for suspicious files in /tmp, /var/tmp"
+    echo -e "${CYAN}•${NC} Check crontabs: crontab -l; ls /etc/cron.*"
+    echo ""
+    
+    echo -e "${BOLD}═══ AUTHORIZED USERS FROM README ═══${NC}"
+    echo -e "${YELLOW}jpearson${NC} - Managing Partner (returned to leadership role)"
+    echo -e "${CYAN}Check README for full list of authorized users${NC}"
+    echo ""
+    
+    press_enter
+}
+
+#############################################
 # Main Menu
 #############################################
 
 show_menu() {
     clear
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}       CYBERPATRIOT SECURITY HARDENING TOOL${NC}"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${GREEN}=== CORE SECURITY ===${NC}"
     echo -e "${GREEN} 1)${NC} User Auditing"
     echo -e "${GREEN} 2)${NC} Disable Root Login"
     echo -e "${GREEN} 3)${NC} Configure Firewall (UFW)"
@@ -5805,12 +7118,23 @@ show_menu() {
     echo -e "${GREEN} 7)${NC} Audit File Permissions"
     echo -e "${GREEN} 8)${NC} Update System"
     echo -e "${GREEN} 9)${NC} Remove Prohibited Software"
+    echo ""
+    echo -e "${CYAN}=== SERVICE HARDENING ===${NC}"
     echo -e "${GREEN}10)${NC} Harden SSH Configuration"
     echo -e "${GREEN}11)${NC} Harden FTP Server (vsftpd)"
     echo -e "${GREEN}12)${NC} Enable Security Features"
     echo -e "${RED}13)${NC} Complete Password Complexity & PAM Config ${RED}(⚠️ SNAPSHOT FIRST!)${NC}"
     echo -e "${GREEN}14)${NC} OS Settings (Screen Lock, Bluetooth, Updates, Kernel, Boot)"
     echo -e "${GREEN}15)${NC} Application Security (Apache, Nginx, MySQL, PostgreSQL)"
+    echo ""
+    echo -e "${YELLOW}=== LAMP STACK HARDENING ===${NC}"
+    echo -e "${GREEN}16)${NC} Harden Apache (LAMP)"
+    echo -e "${GREEN}17)${NC} Harden MySQL/MariaDB (LAMP)"
+    echo -e "${GREEN}18)${NC} Harden PHP (LAMP)"
+    echo -e "${GREEN}19)${NC} Kernel Debug & SysRq Disable"
+    echo -e "${GREEN}20)${NC} Harden OrangeHRM"
+    echo -e "${GREEN}21)${NC} LAMP Info Leak Audit"
+    echo -e "${GREEN}22)${NC} Manual Security Steps Checklist"
     echo ""
     echo -e "${RED} 0)${NC} Exit"
     echo ""
@@ -5845,6 +7169,13 @@ main() {
             13) complete_password_pam_configuration ;;
             14) configure_os_settings ;;
             15) harden_application_security ;;
+            16) harden_apache ;;
+            17) harden_mysql ;;
+            18) harden_php ;;
+            19) harden_kernel_debug ;;
+            20) harden_orangehrm ;;
+            21) lamp_info_leak_audit ;;
+            22) manual_security_steps ;;
             0)
                 print_header "EXITING"
                 print_info "Security audit log saved to: $LOG_FILE"
